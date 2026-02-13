@@ -340,12 +340,12 @@ std::string Darkorbit::get_method_signature(avm::MethodInfo *mi, bool method_nam
             std::string mn = mi->name();
             if (mn.empty()) return "";
 
-            ss << "(";
             auto index = mn.find('/');
             if (index != std::string::npos) {
-                ss << mn.substr(index + 1);
-            } else ss << mn;
-            ss << ")";
+                mn[index] = ' ';
+            }
+
+            ss << "(" << mn << ")";
         }
 
         ss << "(";
