@@ -39,6 +39,7 @@ namespace avm
         TRAIT_Getter    = 0x02,
         TRAIT_Setter    = 0x03,
         TRAIT_Class     = 0x04,
+        TRAIT_Function  = 0x05,
         TRAIT_Const     = 0x06,
         TRAIT_COUNT     = TRAIT_Const+1,
         TRAIT_mask      = 15
@@ -469,10 +470,7 @@ namespace avm
             return result;
         }
 
-        std::string name()
-        {
-            return pool->get_method_name(id);
-        }
+        std::string name();
 
         inline bool compiled() {
             return ((flags >> 21) & 1) == 1;

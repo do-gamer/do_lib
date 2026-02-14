@@ -1,6 +1,8 @@
 #include "avm.h"
 #include "binary_stream.h"
 #include "utils.h"
+#include <mutex>
+#include <unordered_map>
 
 avm::ClassClosure * avm::AbcEnv::finddef(const std::string &name)
 {
@@ -35,6 +37,138 @@ avm::ClassClosure * avm::AbcEnv::finddef(std::function<bool(avm::ClassClosure *)
         }
     }
     return nullptr;
+}
+
+std::string avm::MethodInfo::name()
+{
+    static std::mutex cache_mutex;
+    static std::unordered_map<const avm::MethodInfo *, std::string> cache;
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto [it, inserted] = cache.try_emplace(this);
+    if (!inserted)
+    {
+        return it->second;
+    }
+
+    std::string method_name = pool->get_method_name(id);
+    std::string &resolved_name = it->second;
+    resolved_name = method_name;
+
+    if (!method_name.empty() && declarer.is_traits())
+    {
+        auto *traits = declarer.traits();
+        if (traits && traits->traits_pos)
+        {
+            BinaryStream s { traits->traits_pos };
+            uint32_t trait_count = 0;
+
+            switch (traits->pos_type)
+            {
+                case 0: // instance_info
+                {
+                    /* name */ s.read_u32();
+                    /* super_name */ s.read_u32();
+
+                    auto flags = s.read_u32();
+                    if ((flags & 0x8) != 0)
+                    {
+                        /* protected_ns */ s.read_u32();
+                    }
+
+                    auto interface_count = s.read_u32();
+                    for (uint32_t i = 0; i < interface_count; i++)
+                    {
+                        /* interface */ s.read_u32();
+                    }
+
+                    /* iinit */ s.read_u32();
+                    trait_count = s.read_u32();
+                    break;
+                }
+                case 1: // class_info
+                case 2: // script_info
+                {
+                    /* cinit/init */ s.read_u32();
+                    trait_count = s.read_u32();
+                    break;
+                }
+                default:
+                {
+                    break;
+                }
+            }
+
+            for (uint32_t j = 0; j < trait_count; j++)
+            {
+                /* name */ s.read_u32();
+                unsigned char tag = s.read<uint8_t>();
+                int kind = (tag & avm::TRAIT_mask);
+
+                switch(kind)
+                {
+                    case avm::TRAIT_Slot:
+                    case avm::TRAIT_Const:
+                    {
+                        /* slot_id */ s.read_u32();
+                        /* type_name */ s.read_u32();
+                        uint32_t vindex = s.read_u32();
+                        if (vindex)
+                        {
+                            /* vkind */ s.read<uint8_t>();
+                        }
+                        break;
+                    }
+                    case avm::TRAIT_Class:
+                    case avm::TRAIT_Function:
+                    {
+                        /* slot_id */ s.read_u32();
+                        /* class/function index */ s.read_u32();
+                        break;
+                    }
+                    case avm::TRAIT_Method:
+                    case avm::TRAIT_Getter:
+                    case avm::TRAIT_Setter:
+                    {
+                        /* disp_id */ s.read_u32();
+                        uint32_t method_index = s.read_u32();
+
+                        if (static_cast<int32_t>(method_index) == id)
+                        {
+                            switch (kind)
+                            {
+                                case avm::TRAIT_Setter:
+                                    resolved_name = "set " + method_name;
+                                    break;
+                                case avm::TRAIT_Getter:
+                                    resolved_name = "get " + method_name;
+                                    break;
+                                default:
+                                    break;
+                            }
+
+                            return resolved_name;
+                        }
+                        break;
+                    }
+                    default:
+                    {
+                        break;
+                    }
+                }
+
+                if (tag & avm::ATTR_metadata)
+                {
+                    uint32_t metadata_count = s.read_u32();
+                    for (uint32_t i = 0; i < metadata_count; i++)
+                    {
+                        /* metadata index */ s.read_u32();
+                    }
+                }
+            }
+        }
+    }
+
+    return resolved_name;
 }
 
 avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
@@ -98,6 +232,13 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
                 /* uint32_t slot_id = */ s.read_u32();
                 uint32_t class_index = s.read_u32(); //  is an index that points into the class array of the abcFile entry
                 trait.id = class_index;
+                break;
+            }
+            case avm::TRAIT_Function:
+            {
+                /* uint32_t slot_id = */ s.read_u32();
+                uint32_t function_index = s.read_u32();
+                trait.id = function_index;
                 break;
             }
             case avm::TRAIT_Method:
