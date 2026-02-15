@@ -38,13 +38,13 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setSize
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setVisible
   (JNIEnv *, jobject, jboolean jv)
 {
-    client.SendBrowserCommand(utils::format("setVisible|{}", int(jv)), 0);
+    client.ToggleBrowserVisibility(jv);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setMinimized
   (JNIEnv *, jobject, jboolean jv)
 {
-    client.SendBrowserCommand(utils::format("minimize|{}", int(jv)), 0);
+    client.ToggleBrowserVisibility(!jv);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_reload

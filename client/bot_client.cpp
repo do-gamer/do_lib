@@ -1,9 +1,7 @@
 #include "bot_client.h"
 #include <cstring>
-#include <thread>
-#include <chrono>
-#include <fstream>
-#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -16,8 +14,250 @@
 #include <sys/sem.h>
 #include <sys/wait.h>
 
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+
 
 #define MEM_SIZE 1024
+
+namespace
+{
+    Window browser_window = 0;
+
+    bool get_window_pid(Display *display, Window window, pid_t &pid)
+    {
+        Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
+        if (atom_pid == None)
+        {
+            return false;
+        }
+
+        Atom actual_type = None;
+        int actual_format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *prop = nullptr;
+
+        int status = XGetWindowProperty(
+                display,
+                window,
+                atom_pid,
+                0,
+                1,
+                False,
+                XA_CARDINAL,
+                &actual_type,
+                &actual_format,
+                &nitems,
+                &bytes_after,
+                &prop);
+
+        if (status != Success || !prop || nitems == 0)
+        {
+            if (prop)
+            {
+                XFree(prop);
+            }
+            return false;
+        }
+
+        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop));
+        XFree(prop);
+        return true;
+    }
+
+    bool is_browser_window_pid(pid_t owner_pid, pid_t browser_pid)
+    {
+        return owner_pid == browser_pid || ProcUtil::IsChildOf(owner_pid, browser_pid);
+    }
+
+    bool x11_window_control_available()
+    {
+        const char *display = std::getenv("DISPLAY");
+        return display && *display;
+    }
+
+    bool try_get_window_attrs(Display *display, Window window)
+    {
+        XWindowAttributes attrs;
+        if (XGetWindowAttributes(display, window, &attrs) != 0)
+        {
+            return true;
+        }
+
+        XSync(display, False);
+        return XGetWindowAttributes(display, window, &attrs) != 0;
+    }
+
+    Window find_toplevel_root_child(Display *display, Window root, Window window)
+    {
+        if (!window)
+        {
+            return 0;
+        }
+
+        Window current = window;
+        while (current)
+        {
+            Window root_return = 0;
+            Window parent_return = 0;
+            Window *children = nullptr;
+            unsigned int nchildren = 0;
+
+            if (!XQueryTree(display, current, &root_return, &parent_return, &children, &nchildren))
+            {
+                return current;
+            }
+
+            if (children)
+            {
+                XFree(children);
+            }
+
+            if (parent_return == 0 || parent_return == root)
+            {
+                return current;
+            }
+
+            current = parent_return;
+        }
+
+        return window;
+    }
+
+    Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid)
+    {
+        if (!root)
+        {
+            return 0;
+        }
+
+        pid_t owner_pid = -1;
+        if (get_window_pid(display, root, owner_pid) && is_browser_window_pid(owner_pid, browser_pid))
+        {
+            return root;
+        }
+
+        Window root_return = 0;
+        Window parent_return = 0;
+        Window *children = nullptr;
+        unsigned int nchildren = 0;
+
+        if (!XQueryTree(display, root, &root_return, &parent_return, &children, &nchildren))
+        {
+            return 0;
+        }
+
+        Window found = 0;
+        for (unsigned int i = 0; i < nchildren && !found; i++)
+        {
+            found = find_browser_owned_descendant_recursive(display, children[i], browser_pid);
+        }
+
+        if (children)
+        {
+            XFree(children);
+        }
+        return found;
+    }
+
+    Window find_browser_client_window(Display *display, pid_t browser_pid)
+    {
+        Window root = DefaultRootWindow(display);
+        Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
+        if (atom_client_list != None)
+        {
+            Atom actual_type = None;
+            int actual_format = 0;
+            unsigned long nitems = 0;
+            unsigned long bytes_after = 0;
+            unsigned char *prop = nullptr;
+
+            int status = XGetWindowProperty(
+                    display,
+                    root,
+                    atom_client_list,
+                    0,
+                    4096,
+                    False,
+                    XA_WINDOW,
+                    &actual_type,
+                    &actual_format,
+                    &nitems,
+                    &bytes_after,
+                    &prop);
+
+            if (status == Success && prop && actual_type == XA_WINDOW)
+            {
+                Window *windows = reinterpret_cast<Window *>(prop);
+                Window child_fallback = 0;
+                for (unsigned long i = 0; i < nitems; i++)
+                {
+                    pid_t owner_pid = -1;
+                    if (!get_window_pid(display, windows[i], owner_pid))
+                    {
+                        continue;
+                    }
+
+                    if (owner_pid == browser_pid)
+                    {
+                        XFree(prop);
+                        return windows[i];
+                    }
+
+                    if (!child_fallback && ProcUtil::IsChildOf(owner_pid, browser_pid))
+                    {
+                        child_fallback = windows[i];
+                    }
+                }
+
+                XFree(prop);
+                if (child_fallback)
+                {
+                    return child_fallback;
+                }
+            }
+            else if (prop)
+            {
+                XFree(prop);
+            }
+        }
+
+        Window any_owned = find_browser_owned_descendant_recursive(display, root, browser_pid);
+        if (!any_owned)
+        {
+            return 0;
+        }
+
+        return find_toplevel_root_child(display, root, any_owned);
+    }
+
+    void toggle_browser_visibility(pid_t browser_pid, bool visible)
+    {
+        Display *display = XOpenDisplay(nullptr);
+        if (!display)
+        {
+            return; // Failed to open display
+        }
+        
+        if (!browser_window || !try_get_window_attrs(display, browser_window))
+        {
+            browser_window = find_browser_client_window(display, browser_pid);
+        }
+
+        if (!browser_window)
+        {
+            XCloseDisplay(display);
+            return; // Failed to find browser window
+        }
+
+        // Show or hide the browser window
+        visible ? XMapWindow(display, browser_window) : XUnmapWindow(display, browser_window);
+
+        XFlush(display);
+        XCloseDisplay(display);
+    }
+}
 
 
 enum class MessageType
@@ -125,6 +365,16 @@ BotClient::BotClient() :
 {
 }
 
+void BotClient::ToggleBrowserVisibility(bool visible)
+{
+    if (m_flash_pid == -1 || !x11_window_control_available())
+    {
+        return;
+    }
+
+    toggle_browser_visibility(m_browser_pid, visible);
+}
+
 BotClient::~BotClient()
 {
     if (m_browser_pid > 0)
@@ -177,7 +427,16 @@ void BotClient::LaunchBrowser()
                 sid.replace(0, 6, "");
             }
 
-            execle(fpath, fpath, "--sid", sid.c_str(), "--url", url.c_str(), "--launch", NULL, envp.data());
+                execle(
+                    fpath,
+                    fpath,
+                    "--sid", sid.c_str(),
+                    "--url", url.c_str(),
+                    "--launch",
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding",
+                    NULL,
+                    envp.data());
             break;
         }
         default:
