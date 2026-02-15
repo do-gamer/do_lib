@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="$ROOT_DIR/build"
+SCRIPTSRC=`readlink -f "$0" || echo "$0"`
+RUN_PATH=`dirname "${SCRIPTSRC}" || echo .`
+
+cd ${RUN_PATH}
+
+BUILD_DIR="./build"
 
 # Clean build directory if --clean or -c flag is provided
 if [[ "${1:-}" == "--clean" || "${1:-}" == "-c" ]]; then
@@ -14,7 +18,7 @@ elif [[ -n "${1:-}" ]]; then
     exit 1
 fi
 
-cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
+cmake -S . -B "$BUILD_DIR" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
 	-DCMAKE_CXX_FLAGS_RELEASE="-Os -ffunction-sections -fdata-sections -fvisibility=hidden" \
