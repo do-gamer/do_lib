@@ -433,6 +433,7 @@ void BotClient::LaunchBrowser()
                     "--sid", sid.c_str(),
                     "--url", url.c_str(),
                     "--launch",
+                    "--ozone-platform=x11",
                     "--disable-background-timer-throttling",
                     "--disable-renderer-backgrounding",
                     NULL,
