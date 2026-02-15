@@ -72,7 +72,7 @@ JNIEXPORT jlong JNICALL Java_eu_darkbot_api_DarkTanos_getMemoryUsage
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_getVersion
   (JNIEnv *, jobject)
 {
-    return 6;
+    return 7;
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_keyClick
