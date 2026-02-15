@@ -4,6 +4,8 @@ find_package(JNI REQUIRED)
 
 include_directories(${PROJECT_NAME} PRIVATE ${JNI_INCLUDE_DIRS})
 
+add_definitions(-DAPI_VERSION=${API_VERSION})
+
 add_library(${PROJECT_NAME} SHARED
     eu_darkbot_api_DarkTanos.cpp
     bot_client.cpp
