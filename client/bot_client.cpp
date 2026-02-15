@@ -509,7 +509,6 @@ void BotClient::reset()
     m_flash_pid = -1;
     m_flash_sem = -1;
     m_flash_shmid = -1;
-    m_flash_pid = -1;
 }
 
 // Not a great name since it has side-effects like refreshgin or restarting the browser
@@ -545,12 +544,10 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         return;
     }
 
+    if ((m_flash_shmid = shmget(m_flash_pid, MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
-        if ((m_flash_shmid = shmget(m_flash_pid, MEM_SIZE, IPC_CREAT | 0666)) < 0)
-        {
-            fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
-            return;
-        }
+        fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
+        return;
     }
 
     if (!m_shared_mem_flash || m_shared_mem_flash == (void *)-1)
@@ -579,7 +576,6 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     sembuf sop[2] { { 0, -1, 0 }, { 1, 0, 0 } };
 
     // Notify
-    sop[0] = { 0, -1, 0 };
     if (semtimedop(m_flash_sem, &sop[0], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
@@ -592,7 +588,6 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     }
 
     // Wait
-    sop[1] = { 1, 0, 0 };
     if (semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
