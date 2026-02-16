@@ -158,20 +158,22 @@ int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uin
 
     size_t query_size = strlen(mask);
 
+    std::vector<uint8_t> buf;
     for (auto &region : GetPages(pid))
     {
         size_t size = region.end - region.start;
         if (query_size > size)
             continue;
 
-        std::vector<uint8_t> buf(size);
+        // reuse buffer to avoid repeated allocations
+        buf.resize(size);
 
         ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buf.data(), size);
 
         if (bytes_read < static_cast<ssize_t>(query_size))
             continue;
 
-        for (size_t i = 0 ; finds != amount && i < (bytes_read - query_size) ; i+=alignment)
+        for (size_t i = 0 ; finds != amount && i < (static_cast<size_t>(bytes_read) - query_size) ; i+=alignment)
         {
             bool found = true;
             for (uintptr_t j = 0; j < query_size && found; j++)

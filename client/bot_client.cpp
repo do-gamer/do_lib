@@ -609,8 +609,11 @@ bool BotClient::SendNotification(uintptr_t screen_manager, const std::string &na
 {
     Message message;
     message.type = MessageType::SEND_NOTIFICATION;
-    message.notify.argc = args.size();
-    std::memcpy(message.notify.argv, args.data(), sizeof(message.notify.argv));
+    size_t cap = sizeof(message.notify.argv) / sizeof(message.notify.argv[0]);
+    size_t to_copy = std::min(args.size(), cap);
+    message.notify.argc = to_copy;
+    if (to_copy)
+        std::memcpy(message.notify.argv, args.data(), to_copy * sizeof(message.notify.argv[0]));
     std::strncpy(message.notify.name, name.c_str(), sizeof(message.notify.name));
     SendFlashCommand(&message);
     return true;
@@ -646,8 +649,11 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 
     message.call.object = obj;
     message.call.index = index;
-    message.call.argc = args.size();
-    memcpy(message.call.argv, args.data(), args.size() * sizeof(uintptr_t));
+    size_t cap = sizeof(message.call.argv) / sizeof(message.call.argv[0]);
+    size_t to_copy = std::min(args.size(), cap);
+    message.call.argc = to_copy;
+    if (to_copy)
+        memcpy(message.call.argv, args.data(), to_copy * sizeof(uintptr_t));
 
     Message response;
 

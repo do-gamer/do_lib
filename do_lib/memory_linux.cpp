@@ -66,9 +66,10 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
             continue;
         }
 
-        // copy region into a local buffer once to avoid repeated cross-page dereferences
+        // reuse a buffer across regions to reduce allocations
+        static std::vector<uint8_t> buf;
         try {
-            std::vector<uint8_t> buf(size);
+            buf.resize(size);
             std::memcpy(buf.data(), reinterpret_cast<const void *>(region.start), size);
 
             for (uintptr_t i = 0; i + query_size <= size; i += std::max<uintptr_t>(1, alignment))
