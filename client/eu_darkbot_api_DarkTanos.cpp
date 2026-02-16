@@ -44,6 +44,8 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setVisible
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setMinimized
   (JNIEnv *, jobject, jboolean jv)
 {
+    // Using the same hiding approach as with "setVisible", since minimizing causes lags and increases the tick.
+    // The boolean "jv" is inverted because "setMinimized(true)" should hide the window. 
     client.ToggleBrowserVisibility(!jv);
 }
 
