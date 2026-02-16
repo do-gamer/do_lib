@@ -66,22 +66,31 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
             continue;
         }
 
-        for (uintptr_t i = region.start; i < region.end-query_size; i++)
-        {
-            bool found = true;
-            for (uintptr_t j = 0; j < query_size; j++)
+        // copy region into a local buffer once to avoid repeated cross-page dereferences
+        try {
+            std::vector<uint8_t> buf(size);
+            std::memcpy(buf.data(), reinterpret_cast<const void *>(region.start), size);
+
+            for (uintptr_t i = 0; i + query_size <= size; i += std::max<uintptr_t>(1, alignment))
             {
-                if (*reinterpret_cast<uint8_t *>(i + j) != query[j] && mask[j] != '?')
+                bool found = true;
+                for (uintptr_t j = 0; j < query_size; j++)
                 {
-                    found = false;
-                    break;
+                    if (buf[i + j] != query[j] && mask[j] != '?')
+                    {
+                        found = false;
+                        break;
+                    }
+                }
+
+                if (found)
+                {
+                    return region.start + i;
                 }
             }
-
-            if (found)
-            {
-                return i;
-            }
+        } catch (const std::bad_alloc &) {
+            // couldn't allocate buffer for this region; skip it
+            continue;
         }
     }
 

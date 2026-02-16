@@ -11,23 +11,26 @@
 bool ProcUtil::IsChildOf(pid_t child_pid, pid_t test_parent)
 {
     auto pid = child_pid;
-    while (true)
+    // walk up the parent chain but avoid an infinite loop; limit depth
+    const int max_depth = 128;
+    for (int depth = 0; depth < max_depth; ++depth)
     {
-        if (std::ifstream fi { "/proc/"+std::to_string(pid)+"/stat" } )
-        {
-            pid_t _pid;
-            std::string name;
-            char state;
-            pid_t parent;
-            fi >> _pid >> name >> state >> parent;
+        std::ifstream fi { "/proc/"+std::to_string(pid)+"/stat" };
+        if (!fi)
+            break;
 
-            if (parent == test_parent)
-                return true;
-            else if (parent == 1)
-                break;
+        pid_t _pid;
+        std::string name;
+        char state;
+        pid_t parent;
+        fi >> _pid >> name >> state >> parent;
 
-            pid = parent;
-        }
+        if (parent == test_parent)
+            return true;
+        if (parent <= 1 || parent == pid)
+            break;
+
+        pid = parent;
     }
     return false;
 }
