@@ -68,10 +68,10 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
             continue;
         }
 
-        // reuse a buffer across regions to reduce allocations
-        static std::vector<uint8_t> buf;
-        try {
-            buf.resize(size);
+        // copy region into a local buffer once to avoid repeated cross-page dereferences
+        try
+        {
+            std::vector<uint8_t> buf(size);
             std::memcpy(buf.data(), reinterpret_cast<const void *>(region.start), size);
 
             size_t offset = 0;
@@ -82,7 +82,9 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
                 if (found == SIZE_MAX) break;
                 return region.start + found;
             }
-        } catch (const std::bad_alloc &) {
+        }
+        catch (const std::bad_alloc &)
+        {
             // couldn't allocate buffer for this region; skip it
             continue;
         }

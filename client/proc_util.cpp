@@ -146,7 +146,7 @@ uint64_t ProcUtil::GetMemoryUsage(pid_t pid)
 int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uintptr_t *out, uint32_t amount)
 {
     uint32_t finds = 0,
-        alignment= 1;
+             alignment = 1;
 
     size_t query_size = strlen(mask);
 
@@ -158,8 +158,7 @@ int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uin
         if (query_size > size)
             continue;
 
-        // reuse buffer to avoid repeated allocations
-        buf.resize(size);
+        std::vector<uint8_t> buf(size);
 
         ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buf.data(), size);
 
