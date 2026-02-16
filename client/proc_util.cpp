@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include <cstring>
+#include "../tools/masked_bmh.h"
 
 #include <sys/uio.h>
 #include <unistd.h>
@@ -51,16 +52,7 @@ std::vector<int> ProcUtil::FindProcsByName(const std::string &pattern)
 
         if (std::ifstream cmdline_f { cmd_path.string(), std::ios::binary})
         {
-            std::string contents;
-
-            char buf[1024] { 0 };
-
-            bool stop = false;
-            while (!stop)
-            {
-                stop = !cmdline_f.read(buf, sizeof(buf));
-                contents.insert(contents.end(), buf, &buf[cmdline_f.gcount()]);
-            }
+            std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
 
             std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
 
@@ -159,6 +151,7 @@ int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uin
     size_t query_size = strlen(mask);
 
     std::vector<uint8_t> buf;
+    const char *mask_c = mask;
     for (auto &region : GetPages(pid))
     {
         size_t size = region.end - region.start;
@@ -173,13 +166,15 @@ int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uin
         if (bytes_read < static_cast<ssize_t>(query_size))
             continue;
 
-        for (size_t i = 0 ; finds != amount && i < (static_cast<size_t>(bytes_read) - query_size) ; i+=alignment)
-        {
-            bool found = true;
-            for (uintptr_t j = 0; j < query_size && found; j++)
-                found &= (buf[i + j] == query[j]) | (mask[j] == '?');
-            if (found)
-                out[finds++] = region.start + i;
+        size_t offset = 0;
+        while (finds != amount) {
+            size_t found = masked_bmh_search(buf.data(), static_cast<size_t>(bytes_read),
+                             reinterpret_cast<const uint8_t*>(query), mask_c, query_size,
+                             offset, alignment);
+            if (found == SIZE_MAX) break;
+            out[finds++] = region.start + found;
+            offset = found + 1;
+            if (offset + query_size > static_cast<size_t>(bytes_read)) break;
         }
     }
     return finds;

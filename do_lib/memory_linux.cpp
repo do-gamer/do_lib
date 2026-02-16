@@ -6,8 +6,9 @@
 #include <time.h>
 #include <sstream>
 #include <iostream>
+#include <fstream>
 
-#include "utils.h"
+#include "../tools/masked_bmh.h"
 
 
 int memory:: unprotect(uint64_t address)
@@ -48,6 +49,7 @@ std::vector<memory::MemPage> memory::get_pages(const std::string &name)
     return pages;
 }
 
+
 uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignment, const std::string &area)
 {
     uintptr_t query_size = strlen(mask);
@@ -72,22 +74,13 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
             buf.resize(size);
             std::memcpy(buf.data(), reinterpret_cast<const void *>(region.start), size);
 
-            for (uintptr_t i = 0; i + query_size <= size; i += std::max<uintptr_t>(1, alignment))
-            {
-                bool found = true;
-                for (uintptr_t j = 0; j < query_size; j++)
-                {
-                    if (buf[i + j] != query[j] && mask[j] != '?')
-                    {
-                        found = false;
-                        break;
-                    }
-                }
-
-                if (found)
-                {
-                    return region.start + i;
-                }
+            size_t offset = 0;
+            while (true) {
+                size_t found = masked_bmh_search(buf.data(), size,
+                                                 reinterpret_cast<const uint8_t*>(query), mask, query_size,
+                                                 offset, alignment);
+                if (found == SIZE_MAX) break;
+                return region.start + found;
             }
         } catch (const std::bad_alloc &) {
             // couldn't allocate buffer for this region; skip it
