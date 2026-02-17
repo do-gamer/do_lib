@@ -656,9 +656,9 @@ namespace avm
         ScriptObject *delegate;
 
         template<typename T>
-        void write_at(uintptr_t offset, T val)
+        void write_at(uintptr_t offset, T value)
         {
-            std::memcpy(reinterpret_cast<void *>(uintptr_t(this) + offset), &val, sizeof(T));
+            std::memcpy(reinterpret_cast<void *>((uintptr_t)this + offset), &value, sizeof(T));
         }
 
         inline AvmCore *core()
