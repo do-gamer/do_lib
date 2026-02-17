@@ -52,40 +52,53 @@ std::vector<memory::MemPage> memory::get_pages(const std::string &name)
 
 uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignment, const std::string &area)
 {
-    uintptr_t query_size = strlen(mask);
-    uintptr_t size = 0;
+    if (!query || !mask)
+        return 0ULL;
 
-    for (auto &region : get_pages(area)) 
+    const uintptr_t query_size = std::strlen(mask);
+    if (query_size == 0)
+        return 0ULL;
+
+    const uintptr_t query_addr = reinterpret_cast<uintptr_t>(query);
+
+    std::vector<uint8_t> buffer; // reused across regions (thread-safe)
+
+    for (const auto &region : get_pages(area))
     {
-        size = region.end - region.start;
+        const uintptr_t region_size = region.end - region.start;
 
-        if (query_size > size 
-            || (uintptr_t(query) > region.start && uintptr_t(query) < region.end) 
-            || region.read == '-' 
-            || region.name == "[vvar]"
-        )
+        if (query_size > region_size
+            || (query_addr > region.start && query_addr < region.end)
+            || region.read == '-'
+            || region.name == "[vvar]")
         {
             continue;
         }
 
-        // copy region into a local buffer once to avoid repeated cross-page dereferences
         try
         {
-            std::vector<uint8_t> buf(size);
-            std::memcpy(buf.data(), reinterpret_cast<const void *>(region.start), size);
-
+            buffer.resize(region_size);
+            std::memcpy(buffer.data(), reinterpret_cast<const void *>(region.start), region_size);
             size_t offset = 0;
-            while (true) {
-                size_t found = masked_bmh_search(buf.data(), size,
-                                                 reinterpret_cast<const uint8_t*>(query), mask, query_size,
-                                                 offset, alignment);
+
+            while (true)
+            {
+                const size_t found = masked_bmh_search(
+                    buffer.data(),
+                    region_size,
+                    reinterpret_cast<const uint8_t *>(query),
+                    mask,
+                    query_size,
+                    offset,
+                    alignment);
+
                 if (found == SIZE_MAX) break;
                 return region.start + found;
             }
         }
         catch (const std::bad_alloc &)
         {
-            // couldn't allocate buffer for this region; skip it
+            // Skip regions that are too large
             continue;
         }
     }

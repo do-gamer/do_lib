@@ -145,38 +145,53 @@ uint64_t ProcUtil::GetMemoryUsage(pid_t pid)
 
 int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uintptr_t *out, uint32_t amount)
 {
-    uint32_t finds = 0,
-             alignment = 1;
+    if (!query || !mask || !out || amount == 0)
+        return 0;
 
-    size_t query_size = strlen(mask);
+    const size_t query_size = std::strlen(mask);
+    if (query_size == 0)
+        return 0;
 
-    std::vector<uint8_t> buf;
-    const char *mask_c = mask;
-    for (auto &region : GetPages(pid))
+    uint32_t finds = 0;
+    const uint32_t alignment = 1;
+
+    std::vector<uint8_t> buffer; // reused per region
+    const uint8_t *query_bytes = reinterpret_cast<const uint8_t *>(query);
+
+    for (const auto &region : GetPages(pid))
     {
-        size_t size = region.end - region.start;
-        if (query_size > size)
-            continue;
+        if (finds == amount) break;
 
-        std::vector<uint8_t> buf(size);
+        const size_t region_size = region.end - region.start;
+        if (query_size > region_size) continue;
 
-        ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buf.data(), size);
-
-        if (bytes_read < static_cast<ssize_t>(query_size))
-            continue;
+        buffer.resize(region_size);
+        const ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buffer.data(), region_size);
+        if (bytes_read < static_cast<ssize_t>(query_size)) continue;
 
         size_t offset = 0;
-        while (finds != amount) {
-            size_t found = masked_bmh_search(buf.data(), static_cast<size_t>(bytes_read),
-                             reinterpret_cast<const uint8_t*>(query), mask_c, query_size,
-                             offset, alignment);
+        const size_t readable = static_cast<size_t>(bytes_read);
+
+        while (finds != amount)
+        {
+            const size_t found = masked_bmh_search(
+                buffer.data(),
+                readable,
+                query_bytes,
+                mask,
+                query_size,
+                offset,
+                alignment);
+
             if (found == SIZE_MAX) break;
+
             out[finds++] = region.start + found;
             offset = found + 1;
-            if (offset + query_size > static_cast<size_t>(bytes_read)) break;
+            if (offset + query_size > readable) break;
         }
     }
-    return finds;
+
+    return static_cast<int>(finds);
 }
 
 uintptr_t ProcUtil::FindPattern(pid_t pid, const std::string &query, const std::string &segment)
