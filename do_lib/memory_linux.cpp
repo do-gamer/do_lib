@@ -61,7 +61,7 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
 
     const uintptr_t query_addr = reinterpret_cast<uintptr_t>(query);
 
-    std::vector<uint8_t> buffer; // reused across regions (thread-safe)
+    static thread_local std::vector<uint8_t> buffer; // reused across threads to avoid repeated allocations
 
     for (const auto &region : get_pages(area))
     {

@@ -462,6 +462,7 @@ namespace avm
             BinaryStream str(abc_info);
             uint32_t param_count = str.read_u32();
             /*uint32_t ret_type =*/ str.read_u32();
+            result.reserve(param_count);
 
             for (uint32_t i = 0; i < param_count; i++)
             {
@@ -614,6 +615,9 @@ namespace avm
 
         MyTraits parse_traits(avm::PoolObject *custom_pool = nullptr);
     };
+
+    /* Clear cached parsed traits (used to invalidate cached entries when VM memory is freed) */
+    void clear_traits_cache();
 
     struct VTable
     {

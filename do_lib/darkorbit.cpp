@@ -120,6 +120,9 @@ void Darkorbit::notify_jit(avm::MethodInfo *method)
 
 void Darkorbit::notify_freechunk(uintptr_t chunk)
 {
+    // Clear parsed-traits cache because VM memory regions may be freed/recycled
+    avm::clear_traits_cache();
+
     for (auto &[id, hook] : m_hooks)
     {
         if ((reinterpret_cast<uintptr_t>(hook.method) & ~0xfff) == chunk)
@@ -151,7 +154,11 @@ std::unordered_map<uint32_t, game::Ship *> Darkorbit::get_ships()
 std::future<uintptr_t> Darkorbit::call_sync(const std::function<uintptr_t()> &f)
 {
     std::scoped_lock lk { m_call_mut };
-    return m_async_calls.emplace_back(f).get_future(); // c++ 17
+    // push the task into the vector, then return its future in a portable way
+    m_async_calls.emplace_back(std::packaged_task<uintptr_t()>(f));
+    auto &task = m_async_calls.back();
+    std::future<uintptr_t> fut = task.get_future();
+    return fut;
 }
 
 void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
@@ -297,15 +304,15 @@ bool Darkorbit::use_item(const std::string &name, uint8_t type, uint8_t bar)
     return false;
 }
 
-bool Darkorbit::send_notification(const std::string &name, std::vector<Atom> args)
+bool Darkorbit::send_notification(const std::string &name, const std::vector<Atom> &args)
 {
     utils::log("[*] Send notification {}\n", name);
 
     auto facade = m_screen_manager->get_at<avm::ScriptObject *>(0x100, 0x78, 0x28);
 
     // no need to cache these, ref count is not increased
-    auto *arg_array =
-        reinterpret_cast<avm::Array *>(flash_stuff::newarray(facade->vtable->methods[0], args.size(), args.data()));
+    auto *arg_array = reinterpret_cast<avm::Array *>(
+        flash_stuff::newarray(facade->vtable->methods[0], static_cast<uint32_t>(args.size()), const_cast<Atom *>(args.data())));
     avm::String *notification = create_string("MapAssetNotificationTRY_TO_SELECT_MAPASSET");
 
     facade->call(8, notification, (uintptr_t)arg_array | 1);

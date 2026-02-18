@@ -155,7 +155,7 @@ int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uin
     uint32_t finds = 0;
     const uint32_t alignment = 1;
 
-    std::vector<uint8_t> buffer; // reused per region
+    static thread_local std::vector<uint8_t> buffer; // reused per thread to avoid repeated allocations
     const uint8_t *query_bytes = reinterpret_cast<const uint8_t *>(query);
 
     for (const auto &region : GetPages(pid))
