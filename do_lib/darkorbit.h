@@ -143,8 +143,6 @@ public:
         return r;
     }
 
-    bool mouse_click(int x, int y, int button);
-
     bool key_click(uint32_t key);
 
     bool lock_entity(uint32_t id);

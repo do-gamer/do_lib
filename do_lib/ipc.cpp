@@ -36,7 +36,6 @@ enum class MessageType
     UPGRADE,
     USE_ITEM,
     KEY_CLICK,
-    MOUSE_CLICK,
     CHECK_SIGNATURE,
     NONE
 
@@ -93,14 +92,6 @@ struct KeyClickMessage
     uint32_t key;
 };
 
-struct MouseClickMessage
-{
-    MessageType type = MessageType::MOUSE_CLICK;
-    uint32_t button;
-    int32_t x;
-    int32_t y;
-};
-
 struct CheckSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -122,7 +113,6 @@ union Message
     RefineMessage refine;
     UseItemMessage item;
     KeyClickMessage key;
-    MouseClickMessage click;
     CheckSignatureMessage sig;
 };
 
@@ -303,22 +293,6 @@ void Ipc::handle_message()
             auto res = Darkorbit::get().call_sync([key=msg->key]
             {
                 return Darkorbit::get().key_click(key);
-            });
-
-            if (res.wait_for(5000ms) != std::future_status::ready)
-            {
-                result->error = true;
-                result->type = MessageType::RESULT;
-            }
-
-            break;
-        }
-        case MessageType::MOUSE_CLICK:
-        {
-            auto *msg = reinterpret_cast<MouseClickMessage *>(m_shared);
-            auto res = Darkorbit::get().call_sync([msg]
-            {
-                return Darkorbit::get().mouse_click(msg->x, msg->y, msg->button);
             });
 
             if (res.wait_for(5000ms) != std::future_status::ready)

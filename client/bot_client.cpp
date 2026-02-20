@@ -418,7 +418,6 @@ enum class MessageType
     UPGRADE,
     USE_ITEM,
     KEY_CLICK,
-    MOUSE_CLICK,
     CHECK_SIGNATURE,
 
     NONE
@@ -475,14 +474,6 @@ struct KeyClickMessage
     uint32_t key;
 };
 
-struct MouseClickMessage
-{
-    MessageType type = MessageType::MOUSE_CLICK;
-    uint32_t button;
-    int32_t x;
-    int32_t y;
-};
-
 struct GetSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -504,7 +495,6 @@ union Message
     RefineMessage refine;
     UseItemMessage item;
     KeyClickMessage key;
-    MouseClickMessage click;
     GetSignatureMessage sig;
 };
 
