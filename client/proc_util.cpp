@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include <cstring>
+#include "masked_bmh.h"
 
 #include <sys/uio.h>
 #include <unistd.h>
@@ -11,23 +12,26 @@
 bool ProcUtil::IsChildOf(pid_t child_pid, pid_t test_parent)
 {
     auto pid = child_pid;
-    while (true)
+    // walk up the parent chain but avoid an infinite loop; limit depth
+    const int max_depth = 128;
+    for (int depth = 0; depth < max_depth; ++depth)
     {
-        if (std::ifstream fi { "/proc/"+std::to_string(pid)+"/stat" } )
-        {
-            pid_t _pid;
-            std::string name;
-            char state;
-            pid_t parent;
-            fi >> _pid >> name >> state >> parent;
+        std::ifstream fi { "/proc/"+std::to_string(pid)+"/stat" };
+        if (!fi)
+            break;
 
-            if (parent == test_parent)
-                return true;
-            else if (parent == 1)
-                break;
+        pid_t _pid;
+        std::string name;
+        char state;
+        pid_t parent;
+        fi >> _pid >> name >> state >> parent;
 
-            pid = parent;
-        }
+        if (parent == test_parent)
+            return true;
+        if (parent <= 1 || parent == pid)
+            break;
+
+        pid = parent;
     }
     return false;
 }
@@ -48,16 +52,7 @@ std::vector<int> ProcUtil::FindProcsByName(const std::string &pattern)
 
         if (std::ifstream cmdline_f { cmd_path.string(), std::ios::binary})
         {
-            std::string contents;
-
-            char buf[1024] { 0 };
-
-            bool stop = false;
-            while (!stop)
-            {
-                stop = !cmdline_f.read(buf, sizeof(buf));
-                contents.insert(contents.end(), buf, &buf[cmdline_f.gcount()]);
-            }
+            std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
 
             std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
 
@@ -150,34 +145,53 @@ uint64_t ProcUtil::GetMemoryUsage(pid_t pid)
 
 int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uintptr_t *out, uint32_t amount)
 {
-    uint32_t finds = 0,
-        alignment= 1;
+    if (!query || !mask || !out || amount == 0)
+        return 0;
 
-    size_t query_size = strlen(mask);
+    const size_t query_size = std::strlen(mask);
+    if (query_size == 0)
+        return 0;
 
-    for (auto &region : GetPages(pid))
+    uint32_t finds = 0;
+    const uint32_t alignment = 1;
+
+    static thread_local std::vector<uint8_t> buffer; // reused per thread to avoid repeated allocations
+    const uint8_t *query_bytes = reinterpret_cast<const uint8_t *>(query);
+
+    for (const auto &region : GetPages(pid))
     {
-        size_t size = region.end - region.start;
-        if (query_size > size)
-            continue;
+        if (finds == amount) break;
 
-        std::vector<uint8_t> buf(size);
+        const size_t region_size = region.end - region.start;
+        if (query_size > region_size) continue;
 
-        ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buf.data(), size);
+        buffer.resize(region_size);
+        const ssize_t bytes_read = ReadMemoryBytes(pid, region.start, buffer.data(), region_size);
+        if (bytes_read < static_cast<ssize_t>(query_size)) continue;
 
-        if (bytes_read < static_cast<ssize_t>(query_size))
-            continue;
+        size_t offset = 0;
+        const size_t readable = static_cast<size_t>(bytes_read);
 
-        for (size_t i = 0 ; finds != amount && i < (bytes_read - query_size) ; i+=alignment)
+        while (finds != amount)
         {
-            bool found = true;
-            for (uintptr_t j = 0; j < query_size && found; j++)
-                found &= (buf[i + j] == query[j]) | (mask[j] == '?');
-            if (found)
-                out[finds++] = region.start + i;
+            const size_t found = masked_bmh_search(
+                buffer.data(),
+                readable,
+                query_bytes,
+                mask,
+                query_size,
+                offset,
+                alignment);
+
+            if (found == SIZE_MAX) break;
+
+            out[finds++] = region.start + found;
+            offset = found + 1;
+            if (offset + query_size > readable) break;
         }
     }
-    return finds;
+
+    return static_cast<int>(finds);
 }
 
 uintptr_t ProcUtil::FindPattern(pid_t pid, const std::string &query, const std::string &segment)

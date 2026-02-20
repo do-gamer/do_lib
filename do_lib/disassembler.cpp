@@ -2,6 +2,7 @@
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
+#include <cstdio>
 #include "binary_stream.h"
 #include "instructions.h"
 
@@ -11,13 +12,18 @@
 
 std::string AbcInstruction::ToString() const
 {
-    std::stringstream ss;
-    ss << ABC::Instructions[static_cast<uint8_t>(opcode)].name << " ";
+    const std::string &name = ABC::Instructions[static_cast<uint8_t>(opcode)].name;
+    std::string out;
+    out.reserve(32 + operands.size() * 8);
+    out.append(name);
+    out.push_back(' ');
+    char buf[32];
     for (auto param : operands)
     {
-        ss << std::hex << param << " ";
+        int n = snprintf(buf, sizeof(buf), "%x ", param);
+        out.append(buf, (n > 0) ? n : 0);
     }
-    return ss.str();
+    return out;
 }
 Disassembler::Disassembly Disassembler::Disassemble(const uint8_t *data)
 {
