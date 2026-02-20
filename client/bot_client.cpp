@@ -16,6 +16,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/X.h>
 
 
 #define MEM_SIZE 1024
@@ -256,6 +257,154 @@ namespace
 
         XFlush(display);
         XCloseDisplay(display);
+    }
+
+    // Execute X11 mouse action on the browser window.
+    template<typename Func>
+    bool execute_mouse_action(int flash_pid, int browser_pid, Func&& action)
+    {
+        if (flash_pid == -1 || !x11_window_control_available())
+        {
+            return false;
+        }
+
+        Display *display = XOpenDisplay(nullptr);
+        if (!display)
+        {
+            return false;
+        }
+
+        if (!browser_window || !try_get_window_attrs(display, browser_window))
+        {
+            browser_window = find_browser_client_window(display, browser_pid);
+        }
+
+        bool result = false;
+        if (browser_window)
+        {
+            result = action(display, browser_window);
+        }
+
+        XCloseDisplay(display);
+        return result;
+    }
+
+    struct MouseEventContext
+    {
+        Display *display;
+        Window window;
+        Window root;
+        int local_x, local_y;
+        int root_x, root_y;
+    };
+
+    bool prepare_mouse_event(Display *display, Window window, int32_t x, int32_t y, MouseEventContext &ctx)
+    {
+        if (!display || !window)
+        {
+            return false;
+        }
+
+        XWindowAttributes attrs;
+        if (XGetWindowAttributes(display, window, &attrs) == 0)
+        {
+            return false;
+        }
+
+        ctx.display = display;
+        ctx.window = window;
+        ctx.local_x = x;
+        ctx.local_y = y;
+
+        if (ctx.local_x < 0)
+            ctx.local_x = 0;
+        if (ctx.local_y < 0)
+            ctx.local_y = 0;
+        if (attrs.width > 0 && ctx.local_x >= attrs.width)
+            ctx.local_x = attrs.width - 1;
+        if (attrs.height > 0 && ctx.local_y >= attrs.height)
+            ctx.local_y = attrs.height - 1;
+
+        ctx.root = DefaultRootWindow(display);
+        Window child = 0;
+        XTranslateCoordinates(display, window, ctx.root, 0, 0, &ctx.root_x, &ctx.root_y, &child);
+
+        return true;
+    }
+
+    void fill_mouse_event_common(XEvent &event, const MouseEventContext &ctx)
+    {
+        std::memset(&event, 0, sizeof(event));
+        event.xany.display = ctx.display;
+        event.xany.window = ctx.window;
+        event.xbutton.root = ctx.root;
+        event.xbutton.subwindow = None;
+        event.xbutton.time = CurrentTime;
+        event.xbutton.x = ctx.local_x;
+        event.xbutton.y = ctx.local_y;
+        event.xbutton.x_root = ctx.root_x + ctx.local_x;
+        event.xbutton.y_root = ctx.root_y + ctx.local_y;
+        event.xbutton.same_screen = True;
+    }
+
+    bool send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    {
+        MouseEventContext ctx;
+        if (!prepare_mouse_event(display, window, x, y, ctx))
+        {
+            return false;
+        }
+
+        XEvent event;
+        fill_mouse_event_common(event, ctx);
+        event.xbutton.button = button;
+
+        if (press)
+        {
+            event.xbutton.type = ButtonPress;
+            if (XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event) == 0)
+            {
+                return false;
+            }
+        }
+
+        if (release)
+        {
+            event.xbutton.type = ButtonRelease;
+            if (XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event) == 0)
+            {
+                return false;
+            }
+        }
+
+        XFlush(ctx.display);
+        return true;
+    }
+
+    bool send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
+    {
+        return send_mouse_button(display, window, x, y, button, true, true);
+    }
+
+    bool send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
+    {
+        MouseEventContext ctx;
+        if (!prepare_mouse_event(display, window, x, y, ctx))
+        {
+            return false;
+        }
+
+        XEvent event;
+        fill_mouse_event_common(event, ctx);
+        event.xmotion.type = MotionNotify;
+
+        if (XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) == 0)
+        {
+            return false;
+        }
+
+        XFlush(ctx.display);
+        return true;
     }
 }
 
@@ -675,13 +824,46 @@ bool BotClient::ClickKey(uint32_t key)
 
 bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
 {
-    Message message;
-    message.type = MessageType::MOUSE_CLICK;
-    message.click.x = x;
-    message.click.y = y;
-    message.click.button = button;
-    SendFlashCommand(&message);
-    return true;
+    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        return send_mouse_button(display, window, x, y, button, true, true);
+    });
+}
+
+bool BotClient::MouseMove(int32_t x, int32_t y)
+{
+    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        return send_mouse_move(display, window, x, y);
+    });
+}
+
+bool BotClient::MouseDown(int32_t x, int32_t y, uint32_t button)
+{
+    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        return send_mouse_button(display, window, x, y, button, true, false);
+    });
+}
+
+bool BotClient::MouseUp(int32_t x, int32_t y, uint32_t button)
+{
+    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        return send_mouse_button(display, window, x, y, button, false, true);
+    });
+}
+
+bool BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
+{
+    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        int steps = delta == 0 ? 0 : (std::abs(delta) + 119) / 120;
+        int button = delta >= 0 ? Button4 : Button5;
+        for (int i = 0; i < steps; i++)
+        {
+            if (!send_mouse_wheel(display, window, x, y, button))
+            {
+                return false;
+            }
+        }
+        return steps > 0;
+    });
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)

@@ -2,6 +2,7 @@
 #include "eu_darkbot_api_DarkTanos.h"
 #include <unistd.h>
 #include <cstring>
+#include <vector>
 
 #include "bot_client.h"
 #include "utils.h"
@@ -96,26 +97,86 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mouseMove|{}|{}", x, y), 1);
+    client.MouseMove(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseDown
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mousePress|{}|{}", x, y), 1);
+    client.MouseDown(x, y, 1);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseUp
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mouseRelease|{}|{}", x, y), 1);
+    client.MouseUp(x, y, 1);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
   (JNIEnv *, jobject, jint x, jint y)
 {
-    //client.SendBrowserCommand(utils::format("mouseClick|{}|{}", x, y), 1);
     client.MouseClick(x, y, 1);
+}
+
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
+  (JNIEnv *env, jobject, jlongArray jactions)
+{
+    if (!jactions)
+    {
+        return;
+    }
+
+    jsize len = env->GetArrayLength(jactions);
+    if (len <= 0)
+    {
+        return;
+    }
+
+    std::vector<jlong> actions(static_cast<size_t>(len));
+    env->GetLongArrayRegion(jactions, 0, len, actions.data());
+
+    for (jlong action : actions)
+    {
+        uint64_t value = static_cast<uint64_t>(action);
+        uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
+        int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
+        int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
+        int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
+
+        int x = lparam_low;
+        int y = lparam_high;
+
+        // Handle native mouse and keyboard events based on the message type.
+        // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
+        
+        switch (message)
+        {
+        case 0x1FF: // Mouse CLICK
+            client.MouseClick(x, y, 1);
+            break;
+        case 0x200: // Mouse MOVE
+            client.MouseMove(x, y);
+            break;
+        case 0x201: // Mouse DOWN
+            client.MouseDown(x, y, 1);
+            break;
+        case 0x202: // Mouse UP
+          client.MouseUp(x, y, 1);
+          break;
+        case 0x20A: // Mouse WHEEL
+            client.MouseScroll(x, y, wparam);
+            break;
+        case 0x1FE: // Key CLICK
+        case 0x100: // Key DOWN
+        case 0x101: // Key UP
+        case 0x102: // Key CHAR
+            client.ClickKey(static_cast<uint16_t>(wparam));
+            break;
+        default:
+            // Unsupported message, ignore
+            break;
+        }
+    }
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_readInt

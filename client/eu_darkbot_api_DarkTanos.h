@@ -129,6 +129,14 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
 
 /*
  * Class:     eu_darkbot_api_DarkTanos
+ * Method:    postActions
+ * Signature: ([J)V
+ */
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
+  (JNIEnv *, jobject, jlongArray);
+
+/*
+ * Class:     eu_darkbot_api_DarkTanos
  * Method:    readInt
  * Signature: (J)I
  */

@@ -37,6 +37,10 @@ public:
     uintptr_t CallMethod(uintptr_t obj, uint32_t index, const std::vector<uintptr_t> &args);
     bool ClickKey(uint32_t key);
     bool MouseClick(int32_t x, int32_t y, uint32_t button);
+    bool MouseMove(int32_t x, int32_t y);
+    bool MouseDown(int32_t x, int32_t y, uint32_t button);
+    bool MouseUp(int32_t x, int32_t y, uint32_t button);
+    bool MouseScroll(int32_t x, int32_t y, int32_t delta);
     int CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig);
 
     template <typename T>
