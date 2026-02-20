@@ -8,7 +8,7 @@
 #include <iostream>
 #include <fstream>
 
-#include "../tools/masked_bmh.h"
+#include "masked_bmh.h"
 
 
 int memory:: unprotect(uint64_t address)

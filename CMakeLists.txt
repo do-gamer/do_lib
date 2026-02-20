@@ -13,6 +13,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(SUBHOOK_STATIC ON)
 set(SUBHOOK_TESTS OFF)
 
+include_directories(${CMAKE_SOURCE_DIR}/tools)
 
 add_subdirectory(client/)
 add_subdirectory(do_lib/)

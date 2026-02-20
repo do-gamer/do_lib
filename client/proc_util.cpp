@@ -4,7 +4,7 @@
 #include <filesystem>
 
 #include <cstring>
-#include "../tools/masked_bmh.h"
+#include "masked_bmh.h"
 
 #include <sys/uio.h>
 #include <unistd.h>
