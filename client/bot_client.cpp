@@ -25,6 +25,59 @@ namespace
 {
     Window browser_window = 0;
 
+    struct WindowProperty
+    {
+        Atom actual_type = None;
+        int actual_format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *prop = nullptr;
+    };
+
+    /**
+     * Helper function to free the memory allocated by XGetWindowProperty and reset the WindowProperty structure.
+     */
+    void free_window_property(WindowProperty &prop)
+    {
+        if (prop.prop)
+        {
+            XFree(prop.prop);
+        }
+        prop.actual_type = None;
+        prop.actual_format = 0;
+        prop.nitems = 0;
+        prop.bytes_after = 0;
+        prop.prop = nullptr;
+    }
+
+    /**
+     * Helper function to get a window property with proper error handling and type checking.
+     */
+    bool get_window_property(Display *display,
+                             Window window,
+                             Atom property,
+                             Atom type,
+                             long length,
+                             WindowProperty &out)
+    {
+        if (!display || property == None)
+        {
+            return false;
+        }
+
+        int status = XGetWindowProperty(display, window, property, 0, length, False, type,
+                                        &out.actual_type,
+                                        &out.actual_format,
+                                        &out.nitems,
+                                        &out.bytes_after,
+                                        &out.prop);
+
+        return status == Success;
+    }
+
+    /**
+     * Helper function to get the PID of the process owning a window, using the _NET_WM_PID property.
+     */
     bool get_window_pid(Display *display, Window window, pid_t &pid)
     {
         Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
@@ -33,51 +86,40 @@ namespace
             return false;
         }
 
-        Atom actual_type = None;
-        int actual_format = 0;
-        unsigned long nitems = 0;
-        unsigned long bytes_after = 0;
-        unsigned char *prop = nullptr;
+        WindowProperty prop;
+        bool property_ok = get_window_property(display, window, atom_pid, XA_CARDINAL, 1, prop);
 
-        int status = XGetWindowProperty(
-                display,
-                window,
-                atom_pid,
-                0,
-                1,
-                False,
-                XA_CARDINAL,
-                &actual_type,
-                &actual_format,
-                &nitems,
-                &bytes_after,
-                &prop);
-
-        if (status != Success || !prop || nitems == 0)
+        if (!property_ok || !prop.prop || prop.nitems == 0)
         {
-            if (prop)
-            {
-                XFree(prop);
-            }
+            free_window_property(prop);
             return false;
         }
 
-        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop));
-        XFree(prop);
+        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop.prop));
+        free_window_property(prop);
         return true;
     }
 
+    /**
+     * Helper function to check if a given PID is the browser process or a child of it.
+     */
     bool is_browser_window_pid(pid_t owner_pid, pid_t browser_pid)
     {
         return owner_pid == browser_pid || ProcUtil::IsChildOf(owner_pid, browser_pid);
     }
 
+    /**
+     * Checks if X11 window control is available by verifying the DISPLAY environment variable.
+     */
     bool x11_window_control_available()
     {
         const char *display = std::getenv("DISPLAY");
         return display && *display;
     }
 
+    /**
+     * Helper function to attempt to get window attributes, handling potential X11 errors gracefully.
+     */
     bool try_get_window_attrs(Display *display, Window window)
     {
         XWindowAttributes attrs;
@@ -90,6 +132,10 @@ namespace
         return XGetWindowAttributes(display, window, &attrs) != 0;
     }
 
+    /**
+     * Helper function to find the top-level root child of a given window,
+     * which is likely the actual browser window we want to control.
+     */
     Window find_toplevel_root_child(Display *display, Window root, Window window)
     {
         if (!window)
@@ -126,6 +172,10 @@ namespace
         return window;
     }
 
+    /**
+     * Recursive helper function to find any descendant window owned by the browser process,
+     * in case the top-level window doesn't have a PID or isn't directly owned by the browser.
+     */
     Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid)
     {
         if (!root)
@@ -162,37 +212,23 @@ namespace
         return found;
     }
 
+    /**
+     * Main function to find the browser window by first checking the _NET_CLIENT_LIST for windows owned by the browser PID.
+     */
     Window find_browser_client_window(Display *display, pid_t browser_pid)
     {
         Window root = DefaultRootWindow(display);
         Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
         if (atom_client_list != None)
         {
-            Atom actual_type = None;
-            int actual_format = 0;
-            unsigned long nitems = 0;
-            unsigned long bytes_after = 0;
-            unsigned char *prop = nullptr;
+            WindowProperty prop;
+            bool property_ok = get_window_property(display, root, atom_client_list, XA_WINDOW, 4096, prop);
 
-            int status = XGetWindowProperty(
-                    display,
-                    root,
-                    atom_client_list,
-                    0,
-                    4096,
-                    False,
-                    XA_WINDOW,
-                    &actual_type,
-                    &actual_format,
-                    &nitems,
-                    &bytes_after,
-                    &prop);
-
-            if (status == Success && prop && actual_type == XA_WINDOW)
+            if (property_ok && prop.prop && prop.actual_type == XA_WINDOW)
             {
-                Window *windows = reinterpret_cast<Window *>(prop);
+                Window *windows = reinterpret_cast<Window *>(prop.prop);
                 Window child_fallback = 0;
-                for (unsigned long i = 0; i < nitems; i++)
+                for (unsigned long i = 0; i < prop.nitems; i++)
                 {
                     pid_t owner_pid = -1;
                     if (!get_window_pid(display, windows[i], owner_pid))
@@ -202,7 +238,7 @@ namespace
 
                     if (owner_pid == browser_pid)
                     {
-                        XFree(prop);
+                        free_window_property(prop);
                         return windows[i];
                     }
 
@@ -212,18 +248,16 @@ namespace
                     }
                 }
 
-                XFree(prop);
                 if (child_fallback)
                 {
+                    free_window_property(prop);
                     return child_fallback;
                 }
             }
-            else if (prop)
-            {
-                XFree(prop);
-            }
-        }
 
+            free_window_property(prop);
+        }
+        
         Window any_owned = find_browser_owned_descendant_recursive(display, root, browser_pid);
         if (!any_owned)
         {
@@ -233,6 +267,79 @@ namespace
         return find_toplevel_root_child(display, root, any_owned);
     }
 
+    /**
+     * Helper function to check if a window has the WM_STATE property, which is a strong indicator
+     * that it's a top-level application window rather than a transient or child window.
+     */
+    bool has_wm_state(Display *display, Window window)
+    {
+        Atom wm_state = XInternAtom(display, "WM_STATE", True);
+        if (wm_state == None)
+        {
+            return false;
+        }
+
+        WindowProperty prop;
+        bool property_ok = get_window_property(display, window, wm_state, wm_state, 2, prop);
+        bool has_state = property_ok && prop.actual_type == wm_state && prop.nitems > 0;
+
+        free_window_property(prop);
+        return has_state;
+    }
+
+    /**
+     * Main function to resolve the actual client window of the browser,
+     * which may involve checking the top-level window and its children
+     */
+    Window resolve_client_window(Display *display, pid_t browser_pid)
+    {
+        if (!display)
+        {
+            return 0;
+        }
+
+        Window window = find_browser_client_window(display, browser_pid);
+        if (!window)
+        {
+            return 0;
+        }
+
+        if (has_wm_state(display, window))
+        {
+            return window;
+        }
+
+        Window root_return = 0;
+        Window parent_return = 0;
+        Window *children = nullptr;
+        unsigned int nchildren = 0;
+
+        if (!XQueryTree(display, window, &root_return, &parent_return, &children, &nchildren))
+        {
+            return window;
+        }
+
+        Window client = 0;
+        for (unsigned int i = 0; i < nchildren; i++)
+        {
+            if (has_wm_state(display, children[i]))
+            {
+                client = children[i];
+                break;
+            }
+        }
+
+        if (children)
+        {
+            XFree(children);
+        }
+
+        return client ? client : window;
+    }
+
+    /**
+     * Toggles the visibility of the browser window by mapping or unmapping it using X11 functions.
+     */
     void toggle_browser_visibility(pid_t browser_pid, bool visible)
     {
         Display *display = XOpenDisplay(nullptr);
@@ -243,7 +350,7 @@ namespace
         
         if (!browser_window || !try_get_window_attrs(display, browser_window))
         {
-            browser_window = find_browser_client_window(display, browser_pid);
+            browser_window = resolve_client_window(display, browser_pid);
         }
 
         if (!browser_window)
@@ -259,7 +366,9 @@ namespace
         XCloseDisplay(display);
     }
 
-    // Execute X11 mouse action on the browser window.
+    /**
+     * Helper function to execute a mouse action on the browser window.
+     */
     template<typename Func>
     bool execute_mouse_action(int flash_pid, int browser_pid, Func&& action)
     {
@@ -276,7 +385,7 @@ namespace
 
         if (!browser_window || !try_get_window_attrs(display, browser_window))
         {
-            browser_window = find_browser_client_window(display, browser_pid);
+            browser_window = resolve_client_window(display, browser_pid);
         }
 
         bool result = false;
@@ -298,6 +407,9 @@ namespace
         int root_x, root_y;
     };
 
+    /**
+     * Prepares the context for a mouse event by translating local coordinates to root coordinates.
+     */
     bool prepare_mouse_event(Display *display, Window window, int32_t x, int32_t y, MouseEventContext &ctx)
     {
         if (!display || !window)
@@ -333,6 +445,9 @@ namespace
         return true;
     }
 
+    /**
+     * Fills the common fields of an XEvent structure for mouse events, based on the provided context.
+     */
     void fill_mouse_event_common(XEvent &event, const MouseEventContext &ctx)
     {
         std::memset(&event, 0, sizeof(event));
@@ -348,6 +463,9 @@ namespace
         event.xbutton.same_screen = True;
     }
 
+    /**
+     * Sends a mouse move event.
+     */
     bool send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
     {
         MouseEventContext ctx;
@@ -365,6 +483,9 @@ namespace
         return true;
     }
 
+    /**
+     * Sends mouse button press/release events.
+     */
     bool send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
     {
         // ensure cursor is moved before generating button events
@@ -397,6 +518,9 @@ namespace
         return true;
     }
 
+    /**
+     * Sends a mouse wheel event.
+     */
     bool send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
         return send_mouse_button(display, window, x, y, button, true, true);
