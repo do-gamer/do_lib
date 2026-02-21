@@ -316,6 +316,7 @@ namespace
         ctx.local_x = x;
         ctx.local_y = y;
 
+        // Clamp coordinates to the window bounds to avoid unexpected behavior
         if (ctx.local_x < 0)
             ctx.local_x = 0;
         if (ctx.local_y < 0)
@@ -347,13 +348,32 @@ namespace
         event.xbutton.same_screen = True;
     }
 
-    bool send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    bool send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
     {
         MouseEventContext ctx;
         if (!prepare_mouse_event(display, window, x, y, ctx))
-        {
             return false;
-        }
+
+        XEvent event;
+        fill_mouse_event_common(event, ctx);
+        event.xmotion.type = MotionNotify;
+
+        if (XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) == 0)
+            return false;
+
+        XFlush(ctx.display);
+        return true;
+    }
+
+    bool send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    {
+        // ensure cursor is moved before generating button events
+        if (!send_mouse_move(display, window, x, y))
+            return false;
+
+        MouseEventContext ctx;
+        if (!prepare_mouse_event(display, window, x, y, ctx))
+            return false;
 
         XEvent event;
         fill_mouse_event_common(event, ctx);
@@ -363,18 +383,14 @@ namespace
         {
             event.xbutton.type = ButtonPress;
             if (XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event) == 0)
-            {
                 return false;
-            }
         }
 
         if (release)
         {
             event.xbutton.type = ButtonRelease;
             if (XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event) == 0)
-            {
                 return false;
-            }
         }
 
         XFlush(ctx.display);
@@ -384,27 +400,6 @@ namespace
     bool send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
         return send_mouse_button(display, window, x, y, button, true, true);
-    }
-
-    bool send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
-    {
-        MouseEventContext ctx;
-        if (!prepare_mouse_event(display, window, x, y, ctx))
-        {
-            return false;
-        }
-
-        XEvent event;
-        fill_mouse_event_common(event, ctx);
-        event.xmotion.type = MotionNotify;
-
-        if (XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) == 0)
-        {
-            return false;
-        }
-
-        XFlush(ctx.display);
-        return true;
     }
 }
 
