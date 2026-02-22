@@ -239,7 +239,7 @@ void Ipc::handle_message()
         case MessageType::SEND_NOTIFICATION:
         {
             auto *msg = reinterpret_cast<SendNotificationMessage *>(m_shared);
-            std::string name = msg->name;
+            std::string name(msg->name, strnlen(msg->name, sizeof(msg->name)));
 
             if (static_cast<size_t>(msg->argc) > sizeof(msg->argv) / sizeof(msg->argv[0]))
             {
@@ -251,7 +251,8 @@ void Ipc::handle_message()
 
             std::vector<uintptr_t> args(&msg->argv[0], &msg->argv[msg->argc]);
 
-            auto res = Darkorbit::get().call_sync([name, args] ()
+            // move args into the lambda to avoid an extra copy; Darkorbit::send_notification takes a const-ref
+            auto res = Darkorbit::get().call_sync([name, args = std::move(args)] ()
             {
                 return Darkorbit::get().send_notification(name, args);
             });
@@ -266,7 +267,7 @@ void Ipc::handle_message()
         case MessageType::USE_ITEM:
         {
             auto *msg = reinterpret_cast<UseItemMessage *>(m_shared);
-            std::string name = msg->name;
+            std::string name(msg->name, strnlen(msg->name, sizeof(msg->name)));
 
             auto res = Darkorbit::get().call_sync([name] ()
             {
@@ -332,11 +333,11 @@ void Ipc::handle_message()
         {
             auto *sig_result = reinterpret_cast<CheckSignatureMessage *>(m_shared);
             auto *msg = reinterpret_cast<CheckSignatureMessage *>(m_shared);
+            std::string signature(msg->signature, strnlen(msg->signature, sizeof(msg->signature)));
 
-
-            auto res = Darkorbit::get().call_sync([msg]
+            auto res = Darkorbit::get().call_sync([msg, signature]()
             {
-                return Darkorbit::get().check_method_signature(msg->object, msg->index, msg->method_name, msg->signature);
+                return Darkorbit::get().check_method_signature(msg->object, msg->index, msg->method_name, signature);
             });
 
 

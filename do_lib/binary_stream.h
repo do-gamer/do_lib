@@ -12,12 +12,14 @@ class BinaryStream
 
     std::string read_string()
     {
-        std::string out_str;
-        for (; data[position] != 0x00; position++)
-        {
-            out_str += char(data[position]);
-        }
-
+        // find the null terminator and construct the string in one allocation
+        size_t start = position;
+        while (data[position] != 0x00)
+            ++position;
+        size_t len = position - start;
+        std::string out_str(reinterpret_cast<const char *>(&data[start]), len);
+        // advance past the terminator
+        ++position;
         return out_str;
     }
 
@@ -30,7 +32,8 @@ class BinaryStream
     template<typename T>
     inline T read()
     {
-        T r = *reinterpret_cast<const T *>(&data[position]);
+        T r;
+        std::memcpy(&r, &data[position], sizeof(T));
         position += sizeof(T);
         return r;
     }
@@ -38,7 +41,8 @@ class BinaryStream
     template<typename T>
     inline T peek()
     {
-        T r = *reinterpret_cast<T *>(&data[position]);
+        T r;
+        std::memcpy(&r, &data[position], sizeof(T));
         return r;
     }
 

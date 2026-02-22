@@ -28,6 +28,7 @@ bool SockIpc::Connect(const std::string &path)
     sockaddr_un m_remote;
     m_remote.sun_family = AF_UNIX;
     strncpy(m_remote.sun_path, path.c_str(), sizeof(m_remote.sun_path));
+    m_remote.sun_path[sizeof(m_remote.sun_path) - 1] = '\0';
 
 
     if (connect(m_sock, reinterpret_cast<sockaddr *>(&m_remote), sizeof(m_remote)) < 0)
@@ -40,6 +41,21 @@ bool SockIpc::Connect(const std::string &path)
 
 void SockIpc::Send(const std::string &msg)
 {
-    write(m_sock, msg.data(), msg.size());
+    const char *buf = msg.data();
+    size_t to_write = msg.size();
+    size_t written = 0;
+    while (written < to_write)
+    {
+        ssize_t n = write(m_sock, buf + written, to_write - written);
+        if (n > 0)
+        {
+            written += static_cast<size_t>(n);
+            continue;
+        }
+        if (n == -1 && errno == EINTR)
+            continue;
+        // on EAGAIN or other errors, bail out
+        break;
+    }
 }
 

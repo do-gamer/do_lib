@@ -43,18 +43,19 @@ std::string avm::MethodInfo::name()
 {
     static std::mutex cache_mutex;
     static std::unordered_map<const avm::MethodInfo *, std::string> cache;
-    std::lock_guard<std::mutex> lock(cache_mutex);
-    auto [it, inserted] = cache.try_emplace(this);
-    if (!inserted)
+
+    // quick-path: check cache under lock, but do expensive work outside
     {
-        return it->second;
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = cache.find(this);
+        if (it != cache.end())
+            return it->second;
     }
 
-    std::string method_name = pool->get_method_name(id);
-    std::string &resolved_name = it->second;
-    resolved_name = method_name;
+    // compute resolved name without holding the mutex
+    std::string resolved_name = pool->get_method_name(id);
 
-    if (!method_name.empty() && declarer.is_traits())
+    if (!resolved_name.empty() && declarer.is_traits())
     {
         auto *traits = declarer.traits();
         if (traits && traits->traits_pos)
@@ -137,15 +138,18 @@ std::string avm::MethodInfo::name()
                             switch (kind)
                             {
                                 case avm::TRAIT_Setter:
-                                    resolved_name = "set " + method_name;
+                                    resolved_name = "set " + resolved_name;
                                     break;
                                 case avm::TRAIT_Getter:
-                                    resolved_name = "get " + method_name;
+                                    resolved_name = "get " + resolved_name;
                                     break;
                                 default:
                                     break;
                             }
 
+                            // insert into cache and return
+                            std::lock_guard<std::mutex> lock(cache_mutex);
+                            cache.try_emplace(this, resolved_name);
                             return resolved_name;
                         }
                         break;
@@ -168,11 +172,34 @@ std::string avm::MethodInfo::name()
         }
     }
 
-    return resolved_name;
+    // insert final resolved name into cache and return
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto [it, inserted] = cache.try_emplace(this, resolved_name);
+        if (!inserted)
+            return it->second;
+        return it->second;
+    }
 }
+
+#include <mutex>
+#include <unordered_map>
+
+static std::mutex g_traits_cache_mutex;
+static std::unordered_map<const avm::Traits *, avm::MyTraits> g_traits_cache;
 
 avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
 {
+    // fast-path: check global cache
+    {
+        std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
+        auto it = g_traits_cache.find(this);
+        if (it != g_traits_cache.end())
+        {
+            return it->second; // copy
+        }
+    }
+
     BinaryStream s { traits_pos };
     custom_pool = custom_pool ? custom_pool : pool;
     MyTraits traits;
@@ -196,6 +223,8 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
     /* auto iinit = */ s.read_u32();
 
     uint32_t trait_count = s.read_u32();
+    traits.traits.reserve(trait_count); // avoid repeated reallocations
+
     for (uint32_t j = 0; j < trait_count; j++)
     {
         MyTrait trait;
@@ -272,6 +301,19 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
 
         traits.add_trait(trait);
     }
+
+    // insert into cache
+    {
+        std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
+        g_traits_cache.try_emplace(this, traits);
+    }
+
     return traits;
+}
+
+void avm::clear_traits_cache()
+{
+    std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
+    g_traits_cache.clear();
 }
 

@@ -462,6 +462,7 @@ namespace avm
             BinaryStream str(abc_info);
             uint32_t param_count = str.read_u32();
             /*uint32_t ret_type =*/ str.read_u32();
+            result.reserve(param_count);
 
             for (uint32_t i = 0; i < param_count; i++)
             {
@@ -615,6 +616,9 @@ namespace avm
         MyTraits parse_traits(avm::PoolObject *custom_pool = nullptr);
     };
 
+    /* Clear cached parsed traits (used to invalidate cached entries when VM memory is freed) */
+    void clear_traits_cache();
+
     struct VTable
     {
         uintptr_t vtable;
@@ -656,9 +660,9 @@ namespace avm
         ScriptObject *delegate;
 
         template<typename T>
-        void write_at(uintptr_t offset, T val)
+        void write_at(uintptr_t offset, T value)
         {
-            *reinterpret_cast<T *>(uintptr_t(this) + offset) = val;
+            std::memcpy(reinterpret_cast<void *>((uintptr_t)this + offset), &value, sizeof(T));
         }
 
         inline AvmCore *core()
@@ -705,7 +709,7 @@ namespace avm
         template <typename T>
         void set_at(const T &value, uintptr_t offset)
         {
-            *(T *)((uintptr_t)this + offset) = value;
+            std::memcpy(reinterpret_cast<void *>((uintptr_t)this + offset), &value, sizeof(T));
         }
 
         template <typename T, typename ... Ts>
@@ -717,7 +721,9 @@ namespace avm
         template <typename T>
         T get_at(uintptr_t offset) const
         {
-            return *(T *)((uintptr_t)this + offset);
+            T v;
+            std::memcpy(&v, reinterpret_cast<const void *>((uintptr_t)this + offset), sizeof(T));
+            return v;
         }
 
         template <typename T, typename ... Ts>

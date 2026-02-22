@@ -6,8 +6,9 @@
 #include <time.h>
 #include <sstream>
 #include <iostream>
+#include <fstream>
 
-#include "utils.h"
+#include "masked_bmh.h"
 
 
 int memory:: unprotect(uint64_t address)
@@ -48,40 +49,57 @@ std::vector<memory::MemPage> memory::get_pages(const std::string &name)
     return pages;
 }
 
+
 uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignment, const std::string &area)
 {
-    uintptr_t query_size = strlen(mask);
-    uintptr_t size = 0;
+    if (!query || !mask)
+        return 0ULL;
 
-    for (auto &region : get_pages(area)) 
+    const uintptr_t query_size = std::strlen(mask);
+    if (query_size == 0)
+        return 0ULL;
+
+    const uintptr_t query_addr = reinterpret_cast<uintptr_t>(query);
+
+    static thread_local std::vector<uint8_t> buffer; // reused across threads to avoid repeated allocations
+
+    for (const auto &region : get_pages(area))
     {
-        size = region.end - region.start;
+        const uintptr_t region_size = region.end - region.start;
 
-        if (query_size > size 
-            || (uintptr_t(query) > region.start && uintptr_t(query) < region.end) 
-            || region.read == '-' 
-            || region.name == "[vvar]"
-        )
+        if (query_size > region_size
+            || (query_addr > region.start && query_addr < region.end)
+            || region.read == '-'
+            || region.name == "[vvar]")
         {
             continue;
         }
 
-        for (uintptr_t i = region.start; i < region.end-query_size; i++)
+        try
         {
-            bool found = true;
-            for (uintptr_t j = 0; j < query_size; j++)
-            {
-                if (*reinterpret_cast<uint8_t *>(i + j) != query[j] && mask[j] != '?')
-                {
-                    found = false;
-                    break;
-                }
-            }
+            buffer.resize(region_size);
+            std::memcpy(buffer.data(), reinterpret_cast<const void *>(region.start), region_size);
+            size_t offset = 0;
 
-            if (found)
+            while (true)
             {
-                return i;
+                const size_t found = masked_bmh_search(
+                    buffer.data(),
+                    region_size,
+                    reinterpret_cast<const uint8_t *>(query),
+                    mask,
+                    query_size,
+                    offset,
+                    alignment);
+
+                if (found == SIZE_MAX) break;
+                return region.start + found;
             }
+        }
+        catch (const std::bad_alloc &)
+        {
+            // Skip regions that are too large
+            continue;
         }
     }
 

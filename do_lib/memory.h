@@ -1,6 +1,7 @@
 #ifndef MEMORY_H
 #define MEMORY_H
 #include <string>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 
@@ -43,27 +44,33 @@ namespace memory
     std::vector<MemPage> get_pages(const std::string &name = "");
 
     template<typename T>
-    constexpr T read(uintptr_t addr)
+    inline T read(uintptr_t addr)
     {
-        return *reinterpret_cast<T *>(addr);
+        T v;
+        std::memcpy(&v, reinterpret_cast<const void *>(addr), sizeof(T));
+        return v;
     }
 
     template <typename T, typename ... Offsets >
-    constexpr T read(uintptr_t address, uintptr_t ofs, Offsets ... offsets)
+    inline T read(uintptr_t address, uintptr_t ofs, Offsets ... offsets)
     {
-        return read<T>(*reinterpret_cast<uintptr_t *>(address) + ofs, offsets...);
+        uintptr_t next = 0;
+        std::memcpy(&next, reinterpret_cast<const void *>(address), sizeof(next));
+        return read<T>(next + ofs, offsets...);
     }
 
     template <typename T>
-    constexpr void write(uintptr_t address, T value)
+    inline void write(uintptr_t address, T value)
     {
-        *reinterpret_cast<T*>(address) = value;
+        std::memcpy(reinterpret_cast<void *>(address), &value, sizeof(T));
     }
 
     template <typename T, typename ... Offsets >
-    constexpr T write(uintptr_t address, T value, uintptr_t ofs, Offsets ... offsets)
+    inline T write(uintptr_t address, T value, uintptr_t ofs, Offsets ... offsets)
     {
-        return write<T>(*reinterpret_cast<uintptr_t *>(address) + ofs, value, offsets...);
+        uintptr_t next = 0;
+        std::memcpy(&next, reinterpret_cast<const void *>(address), sizeof(next));
+        return write<T>(next + ofs, value, offsets...);
     }
 
 };
