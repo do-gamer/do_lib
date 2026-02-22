@@ -3,11 +3,14 @@
 #include <unistd.h>
 #include <cstring>
 #include <vector>
+#include <mutex>
+#include <chrono>
 
 #include "bot_client.h"
 #include "utils.h"
 
 static BotClient client;
+static std::mutex post_actions_mutex;
 
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setData
@@ -132,11 +135,21 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
         return;
     }
 
+    std::lock_guard<std::mutex> actions_lock(post_actions_mutex);
+
     std::vector<jlong> actions(static_cast<size_t>(len));
     env->GetLongArrayRegion(jactions, 0, len, actions.data());
 
-    for (jlong action : actions)
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+
+    for (jsize i = 0; i < len; ++i)
     {
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+          break;
+        }
+
+        jlong action = actions[static_cast<size_t>(i)];
         uint64_t value = static_cast<uint64_t>(action);
         uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
         int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
@@ -148,7 +161,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
 
         // Handle native mouse and keyboard events based on the message type.
         // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
-        
+
         switch (message)
         {
         case 0x1FF: // Mouse CLICK
@@ -161,8 +174,8 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
             client.MouseDown(x, y, 1);
             break;
         case 0x202: // Mouse UP
-          client.MouseUp(x, y, 1);
-          break;
+            client.MouseUp(x, y, 1);
+            break;
         case 0x20A: // Mouse WHEEL
             client.MouseScroll(x, y, wparam);
             break;
