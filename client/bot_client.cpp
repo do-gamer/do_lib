@@ -338,39 +338,10 @@ namespace
     }
 
     /**
-     * Toggles the visibility of the browser window by mapping or unmapping it using X11 functions.
-     */
-    void toggle_browser_visibility(pid_t browser_pid, bool visible)
-    {
-        Display *display = XOpenDisplay(nullptr);
-        if (!display)
-        {
-            return; // Failed to open display
-        }
-        
-        if (!browser_window || !try_get_window_attrs(display, browser_window))
-        {
-            browser_window = resolve_client_window(display, browser_pid);
-        }
-
-        if (!browser_window)
-        {
-            XCloseDisplay(display);
-            return; // Failed to find browser window
-        }
-
-        // Show or hide the browser window
-        visible ? XMapWindow(display, browser_window) : XUnmapWindow(display, browser_window);
-
-        XFlush(display);
-        XCloseDisplay(display);
-    }
-
-    /**
-     * Helper function to execute a mouse action on the browser window.
+     * Helper function to execute an action in the context of the browser window.
      */
     template<typename Func>
-    bool execute_mouse_action(int flash_pid, int browser_pid, Func&& action)
+    bool with_browser_window(int flash_pid, int browser_pid, Func&& action)
     {
         if (flash_pid == -1 || !x11_window_control_available())
         {
@@ -394,6 +365,7 @@ namespace
             result = action(display, browser_window);
         }
 
+        XFlush(display);
         XCloseDisplay(display);
         return result;
     }
@@ -479,7 +451,6 @@ namespace
         if (XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) == 0)
             return false;
 
-        XFlush(ctx.display);
         return true;
     }
 
@@ -514,7 +485,6 @@ namespace
                 return false;
         }
 
-        XFlush(ctx.display);
         return true;
     }
 
@@ -625,12 +595,10 @@ BotClient::BotClient() :
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    if (m_flash_pid == -1 || !x11_window_control_available())
-    {
-        return;
-    }
-
-    toggle_browser_visibility(m_browser_pid, visible);
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
+        return true;
+    });
 }
 
 BotClient::~BotClient()
@@ -933,35 +901,35 @@ bool BotClient::ClickKey(uint32_t key)
 
 bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
 {
-    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, true, true);
     });
 }
 
 bool BotClient::MouseMove(int32_t x, int32_t y)
 {
-    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_move(display, window, x, y);
     });
 }
 
 bool BotClient::MouseDown(int32_t x, int32_t y, uint32_t button)
 {
-    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, true, false);
     });
 }
 
 bool BotClient::MouseUp(int32_t x, int32_t y, uint32_t button)
 {
-    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, false, true);
     });
 }
 
 bool BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
-    return execute_mouse_action(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         int steps = delta == 0 ? 0 : (std::abs(delta) + 119) / 120;
         int button = delta >= 0 ? Button4 : Button5;
         for (int i = 0; i < steps; i++)
