@@ -106,19 +106,19 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseDown
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.MouseDown(x, y, 1);
+    client.MouseDown(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseUp
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.MouseUp(x, y, 1);
+    client.MouseUp(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.MouseClick(x, y, 1);
+    client.MouseClick(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setCursorMarker
@@ -163,28 +163,25 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
         int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
         int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
 
-        int x = lparam_low;
-        int y = lparam_high;
-
         // Handle native mouse and keyboard events based on the message type.
         // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
 
         switch (message)
         {
         case 0x1FF: // Mouse CLICK
-            client.MouseClick(x, y, 1);
+            client.MouseClick(lparam_low, lparam_high);
             break;
         case 0x200: // Mouse MOVE
-            client.MouseMove(x, y);
+            client.MouseMove(lparam_low, lparam_high);
             break;
         case 0x201: // Mouse DOWN
-            client.MouseDown(x, y, 1);
+            client.MouseDown(lparam_low, lparam_high);
             break;
         case 0x202: // Mouse UP
-            client.MouseUp(x, y, 1);
+            client.MouseUp(lparam_low, lparam_high);
             break;
         case 0x20A: // Mouse WHEEL
-            client.MouseScroll(x, y, wparam);
+            client.MouseScroll(lparam_low, lparam_high, wparam);
             break;
         case 0x1FE: // Key CLICK
         case 0x100: // Key DOWN

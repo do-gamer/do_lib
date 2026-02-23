@@ -345,17 +345,17 @@ namespace
      * Helper function to execute an action in the context of the browser window.
      */
     template<typename Func>
-    bool with_browser_window(int flash_pid, int browser_pid, Func&& action)
+    void with_browser_window(int flash_pid, int browser_pid, Func&& action)
     {
         if (flash_pid == -1 || !x11_window_control_available())
         {
-            return false;
+            return;
         }
 
         Display *display = XOpenDisplay(nullptr);
         if (!display)
         {
-            return false;
+            return;
         }
 
         if (!browser_window || !try_get_window_attrs(display, browser_window))
@@ -363,15 +363,13 @@ namespace
             browser_window = resolve_client_window(display, browser_pid);
         }
 
-        bool result = false;
         if (browser_window)
         {
-            result = action(display, browser_window);
+            action(display, browser_window);
         }
 
         XFlush(display);
         XCloseDisplay(display);
-        return result;
     }
 
     struct MouseEventContext
@@ -442,34 +440,30 @@ namespace
     /**
      * Sends a mouse move event.
      */
-    bool send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
+    void send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
     {
         MouseEventContext ctx;
         if (!prepare_mouse_event(display, window, x, y, ctx))
-            return false;
+            return;
 
         XEvent event;
         fill_mouse_event_common(event, ctx);
         event.xmotion.type = MotionNotify;
 
-        if (XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) == 0)
-            return false;
-
-        return true;
+        XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
     }
 
     /**
      * Sends mouse button press/release events.
      */
-    bool send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    void send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
     {
         // ensure cursor is moved before generating button events
-        if (!send_mouse_move(display, window, x, y))
-            return false;
+        send_mouse_move(display, window, x, y);
 
         MouseEventContext ctx;
         if (!prepare_mouse_event(display, window, x, y, ctx))
-            return false;
+            return;
 
         XEvent event;
         fill_mouse_event_common(event, ctx);
@@ -479,25 +473,22 @@ namespace
         {
             event.xbutton.type = ButtonPress;
             if (XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event) == 0)
-                return false;
+                return;
         }
 
         if (release)
         {
             event.xbutton.type = ButtonRelease;
-            if (XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event) == 0)
-                return false;
+            XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event);
         }
-
-        return true;
     }
 
     /**
      * Sends a mouse wheel event.
      */
-    bool send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
+    void send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
-        return send_mouse_button(display, window, x, y, button, true, true);
+        send_mouse_button(display, window, x, y, button, true, true);
     }
 }
 
@@ -601,7 +592,6 @@ void BotClient::ToggleBrowserVisibility(bool visible)
 {
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
-        return true;
     });
 }
 
@@ -903,58 +893,45 @@ bool BotClient::ClickKey(uint32_t key)
     return true;
 }
 
-bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
+void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        return send_mouse_button(display, window, x, y, button, true, true);
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        send_mouse_button(display, window, x, y, Button1, true, true);
     });
     updateCursorMarker(x, y);
-    return result;
 }
 
-bool BotClient::MouseMove(int32_t x, int32_t y)
+void BotClient::MouseMove(int32_t x, int32_t y)
 {
-    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        return send_mouse_move(display, window, x, y);
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        send_mouse_move(display, window, x, y);
     });
     updateCursorMarker(x, y);
-    return result;
 }
 
-bool BotClient::MouseDown(int32_t x, int32_t y, uint32_t button)
+void BotClient::MouseDown(int32_t x, int32_t y)
 {
-    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        return send_mouse_button(display, window, x, y, button, true, false);
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        send_mouse_button(display, window, x, y, Button1, true, false);
     });
     updateCursorMarker(x, y);
-    return result;
 }
 
-bool BotClient::MouseUp(int32_t x, int32_t y, uint32_t button)
+void BotClient::MouseUp(int32_t x, int32_t y)
 {
-    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        return send_mouse_button(display, window, x, y, button, false, true);
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        send_mouse_button(display, window, x, y, Button1, false, true);
     });
     updateCursorMarker(x, y);
-    return result;
 }
 
-bool BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
+void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
-    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        int steps = delta == 0 ? 0 : (std::abs(delta) + 119) / 120;
-        int button = delta >= 0 ? Button4 : Button5;
-        for (int i = 0; i < steps; i++)
-        {
-            if (!send_mouse_wheel(display, window, x, y, button))
-            {
-                return false;
-            }
-        }
-        return steps > 0;
+    int button = delta >= 0 ? Button4 : Button5;
+    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        send_mouse_wheel(display, window, x, y, button);
     });
     updateCursorMarker(x, y);
-    return result;
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
@@ -1075,7 +1052,6 @@ void BotClient::updateCursorMarker(int x, int y)
             // move marker on its own display (should be same as 'display' but we stored earlier when created)
             XMoveWindow(m_marker_display, m_marker_window, root_x, root_y);
             XFlush(m_marker_display);
-            return true;
         });
     }
 

@@ -39,11 +39,11 @@ public:
     bool UseItem(const std::string &name, uint8_t type, uint8_t bar);
     uintptr_t CallMethod(uintptr_t obj, uint32_t index, const std::vector<uintptr_t> &args);
     bool ClickKey(uint32_t key);
-    bool MouseClick(int32_t x, int32_t y, uint32_t button);
-    bool MouseMove(int32_t x, int32_t y);
-    bool MouseDown(int32_t x, int32_t y, uint32_t button);
-    bool MouseUp(int32_t x, int32_t y, uint32_t button);
-    bool MouseScroll(int32_t x, int32_t y, int32_t delta);
+    void MouseClick(int32_t x, int32_t y);
+    void MouseMove(int32_t x, int32_t y);
+    void MouseDown(int32_t x, int32_t y);
+    void MouseUp(int32_t x, int32_t y);
+    void MouseScroll(int32_t x, int32_t y, int32_t delta);
     int CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig);
 
     // testing helper - show a red dot at the virtual cursor position
