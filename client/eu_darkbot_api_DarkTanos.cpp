@@ -163,31 +163,35 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
         int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
         int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
 
+        int32_t x = static_cast<int32_t>(lparam_low);
+        int32_t y = static_cast<int32_t>(lparam_high);
+        uint32_t key = static_cast<uint32_t>(wparam);
+
         // Handle native mouse and keyboard events based on the message type.
         // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
 
         switch (message)
         {
         case 0x1FF: // Mouse CLICK
-            client.MouseClick(lparam_low, lparam_high);
+            client.MouseClick(x, y);
             break;
         case 0x200: // Mouse MOVE
-            client.MouseMove(lparam_low, lparam_high);
+            client.MouseMove(x, y);
             break;
         case 0x201: // Mouse DOWN
-            client.MouseDown(lparam_low, lparam_high);
+            client.MouseDown(x, y);
             break;
         case 0x202: // Mouse UP
-            client.MouseUp(lparam_low, lparam_high);
+            client.MouseUp(x, y);
             break;
         case 0x20A: // Mouse WHEEL
-            client.MouseScroll(lparam_low, lparam_high, wparam);
+            client.MouseScroll(x, y, wparam);
             break;
         case 0x1FE: // Key CLICK
-        case 0x100: // Key DOWN
-        case 0x101: // Key UP
+        // case 0x100: // Key DOWN
+        // case 0x101: // Key UP
         case 0x102: // Key CHAR
-            client.ClickKey(static_cast<uint16_t>(wparam));
+            client.ClickKey(key);
             break;
         default:
             // Unsupported message, ignore

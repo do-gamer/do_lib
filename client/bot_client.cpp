@@ -469,8 +469,7 @@ namespace
         if (press)
         {
             event.xbutton.type = ButtonPress;
-            if (XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event) == 0)
-                return;
+            XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event);
         }
 
         if (release)
