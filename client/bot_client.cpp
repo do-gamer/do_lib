@@ -513,11 +513,14 @@ namespace
 
         int scr = DefaultScreen(cursor_marker.display);
         Window root = RootWindow(cursor_marker.display, scr);
+        
+        const int dot_size = 6; // 6x6 pixels marker
+        const char *dot_color = "red"; // marker color name
 
         Colormap cmap = DefaultColormap(cursor_marker.display, scr);
         XColor color;
         XColor exact;
-        if (!XAllocNamedColor(cursor_marker.display, cmap, "red", &color, &exact))
+        if (!XAllocNamedColor(cursor_marker.display, cmap, dot_color, &color, &exact))
         {
             color.pixel = 0; // fallback black
         }
@@ -531,7 +534,7 @@ namespace
         cursor_marker.window = XCreateWindow(
             cursor_marker.display,
             root,
-            0, 0, 5, 5, 0,
+            0, 0, dot_size, dot_size, 0,
             CopyFromParent,
             InputOutput,
             CopyFromParent,
@@ -614,7 +617,8 @@ namespace
                 XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
 
                 // move marker on its own display (should be same as 'display' but we stored earlier when created)
-                XMoveWindow(cursor_marker.display, cursor_marker.window, root_x, root_y);
+                const int offset = 3; // center correction for a 6x6 dot
+                XMoveWindow(cursor_marker.display, cursor_marker.window, root_x - offset, root_y - offset);
                 XFlush(cursor_marker.display);
             });
         }
