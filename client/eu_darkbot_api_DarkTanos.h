@@ -129,6 +129,14 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
 
 /*
  * Class:     eu_darkbot_api_DarkTanos
+ * Method:    setCursorMarker
+ * Signature: (Z)V
+ */
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setCursorMarker
+  (JNIEnv *, jobject, jboolean);
+
+/*
+ * Class:     eu_darkbot_api_DarkTanos
  * Method:    postActions
  * Signature: ([J)V
  */

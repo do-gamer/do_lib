@@ -121,6 +121,13 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
     client.MouseClick(x, y, 1);
 }
 
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setCursorMarker
+  (JNIEnv *, jobject, jboolean enabled)
+{
+    // Show red dot at the cursor position (useful for debugging)
+    client.EnableCursorMarker(enabled);
+}
+
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
   (JNIEnv *env, jobject, jlongArray jactions)
 {

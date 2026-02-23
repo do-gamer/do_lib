@@ -2,6 +2,9 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -17,6 +20,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/X.h>
+#include <X11/extensions/shape.h>
 
 
 #define MEM_SIZE 1024
@@ -901,35 +905,43 @@ bool BotClient::ClickKey(uint32_t key)
 
 bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
 {
-    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, true, true);
     });
+    updateCursorMarker(x, y);
+    return result;
 }
 
 bool BotClient::MouseMove(int32_t x, int32_t y)
 {
-    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_move(display, window, x, y);
     });
+    updateCursorMarker(x, y);
+    return result;
 }
 
 bool BotClient::MouseDown(int32_t x, int32_t y, uint32_t button)
 {
-    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, true, false);
     });
+    updateCursorMarker(x, y);
+    return result;
 }
 
 bool BotClient::MouseUp(int32_t x, int32_t y, uint32_t button)
 {
-    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         return send_mouse_button(display, window, x, y, button, false, true);
     });
+    updateCursorMarker(x, y);
+    return result;
 }
 
 bool BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
-    return with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    bool result = with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         int steps = delta == 0 ? 0 : (std::abs(delta) + 119) / 120;
         int button = delta >= 0 ? Button4 : Button5;
         for (int i = 0; i < steps; i++)
@@ -941,6 +953,8 @@ bool BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
         }
         return steps > 0;
     });
+    updateCursorMarker(x, y);
+    return result;
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
@@ -958,4 +972,134 @@ int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check
     SendFlashCommand(&message, &response);
 
     return response.sig.result;
+}
+
+// --- cursor marker helpers ------------------------------------------------
+
+void BotClient::EnableCursorMarker(bool enable)
+{
+    if (enable == m_cursor_marker_enabled)
+        return;
+
+    m_cursor_marker_enabled = enable;
+    if (!enable)
+    {
+        if (m_marker_window && m_marker_display)
+        {
+            XDestroyWindow(m_marker_display, m_marker_window);
+            XCloseDisplay(m_marker_display);
+        }
+        m_marker_window = 0;
+        m_marker_display = nullptr;
+    }
+}
+
+void BotClient::createCursorMarker()
+{
+    if (!m_cursor_marker_enabled || m_marker_window)
+        return;
+
+    m_marker_display = XOpenDisplay(NULL);
+    if (!m_marker_display)
+        return;
+
+    int scr = DefaultScreen(m_marker_display);
+    Window root = RootWindow(m_marker_display, scr);
+
+    Colormap cmap = DefaultColormap(m_marker_display, scr);
+    XColor color;
+    XColor exact;
+    if (!XAllocNamedColor(m_marker_display, cmap, "red", &color, &exact))
+    {
+        color.pixel = 0; // fallback black
+    }
+
+    XSetWindowAttributes attr;
+    attr.override_redirect = True;
+    attr.background_pixel = color.pixel;
+    attr.background_pixmap = None;
+
+    unsigned long mask = CWOverrideRedirect | CWBackPixel;
+    m_marker_window = XCreateWindow(
+        m_marker_display,
+        root,
+        0, 0, 8, 8, 0,
+        CopyFromParent,
+        InputOutput,
+        CopyFromParent,
+        mask,
+        &attr);
+
+    // make the window input‑transparent so it doesn't grab events
+    int shape_event, shape_error;
+    if (XShapeQueryExtension(m_marker_display, &shape_event, &shape_error))
+    {
+        XRectangle rect = { 0, 0, 0, 0 };
+        XShapeCombineRectangles(m_marker_display,
+                                 m_marker_window,
+                                 ShapeInput,
+                                 0, 0,
+                                 &rect,
+                                 1,
+                                 ShapeSet,
+                                 Unsorted);
+    }
+
+    XMapRaised(m_marker_display, m_marker_window);
+    XFlush(m_marker_display);
+}
+
+void BotClient::updateCursorMarker(int x, int y)
+{
+    if (!m_cursor_marker_enabled)
+        return;
+
+    // record last update time
+    {
+        std::lock_guard<std::mutex> lock(m_marker_mutex);
+        m_last_marker_time = std::chrono::steady_clock::now();
+    }
+
+    if (!m_marker_window)
+        createCursorMarker();
+
+    if (m_marker_window && m_marker_display)
+    {
+        // translate coordinates from browser window space to root (screen) space
+        with_browser_window(m_flash_pid, m_browser_pid, [&](Display *display, Window window) {
+            Window root = DefaultRootWindow(display);
+            int root_x = 0, root_y = 0;
+            Window child = 0;
+            XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
+
+            // move marker on its own display (should be same as 'display' but we stored earlier when created)
+            XMoveWindow(m_marker_display, m_marker_window, root_x, root_y);
+            XFlush(m_marker_display);
+            return true;
+        });
+    }
+
+    // schedule a hide check in 3 seconds
+    std::thread([this]() {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        maybeClearMarker();
+    }).detach();
+}
+
+void BotClient::maybeClearMarker()
+{
+    std::lock_guard<std::mutex> lock(m_marker_mutex);
+    if (!m_cursor_marker_enabled)
+        return;
+    auto now = std::chrono::steady_clock::now();
+    if (now - m_last_marker_time >= std::chrono::seconds(3))
+    {
+        if (m_marker_window && m_marker_display)
+        {
+            XDestroyWindow(m_marker_display, m_marker_window);
+            XCloseDisplay(m_marker_display);
+        }
+        m_marker_window = 0;
+        m_marker_display = nullptr;
+    }
 }
