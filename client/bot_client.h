@@ -1,9 +1,6 @@
 #ifndef BOT_CLIENT_H
 #define BOT_CLIENT_H
 #include <memory>
-#include <mutex>
-#include <chrono>
-#include <X11/Xlib.h>
 #include "proc_util.h"
 
 class SockIpc;
@@ -48,6 +45,7 @@ public:
 
     // testing helper - show a red dot at the virtual cursor position
     void EnableCursorMarker(bool enable);
+    void UpdateCursorMarker(int32_t x, int32_t y);
 
     // utility templates that are used by JNI wrapper; keep public so the JNI code can call them
     template <typename T>
@@ -105,19 +103,6 @@ public:
 
 
 private:
-    // state for visual cursor marker (only used when testing)
-    bool m_cursor_marker_enabled = false;
-    Display *m_marker_display = nullptr;
-    Window m_marker_window = 0;
-
-    // auto-hide support: if no update for a period the dot disappears
-    std::chrono::steady_clock::time_point m_last_marker_time;
-    std::mutex m_marker_mutex;
-
-    void updateCursorMarker(int x, int y);
-    void createCursorMarker();
-    void maybeClearMarker();
-
     std::unique_ptr<SockIpc> m_browser_ipc;
     char *m_shared_mem = nullptr;
     Message *m_shared_mem_flash = nullptr;

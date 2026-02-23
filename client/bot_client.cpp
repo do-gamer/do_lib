@@ -458,9 +458,6 @@ namespace
      */
     void send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
     {
-        // ensure cursor is moved before generating button events
-        send_mouse_move(display, window, x, y);
-
         MouseEventContext ctx;
         if (!prepare_mouse_event(display, window, x, y, ctx))
             return;
@@ -489,6 +486,144 @@ namespace
     void send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
         send_mouse_button(display, window, x, y, button, true, true);
+    }
+
+   
+    // --- Cursor Marker state and helpers --- //
+    struct CursorMarkerState
+    {
+        bool enabled = false;
+        Display *display = nullptr;
+        Window window = 0;
+        std::chrono::steady_clock::time_point last_time;
+        std::mutex mutex;
+    };
+
+    static CursorMarkerState cursor_marker;
+
+    /**
+     * Creates a small red window that will serve as a marker for the virtual cursor position.
+     * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
+     */
+    void create_cursor_marker()
+    {
+        cursor_marker.display = XOpenDisplay(NULL);
+        if (!cursor_marker.display)
+            return;
+
+        int scr = DefaultScreen(cursor_marker.display);
+        Window root = RootWindow(cursor_marker.display, scr);
+
+        Colormap cmap = DefaultColormap(cursor_marker.display, scr);
+        XColor color;
+        XColor exact;
+        if (!XAllocNamedColor(cursor_marker.display, cmap, "red", &color, &exact))
+        {
+            color.pixel = 0; // fallback black
+        }
+
+        XSetWindowAttributes attr;
+        attr.override_redirect = True;
+        attr.background_pixel = color.pixel;
+        attr.background_pixmap = None;
+
+        unsigned long mask = CWOverrideRedirect | CWBackPixel;
+        cursor_marker.window = XCreateWindow(
+            cursor_marker.display,
+            root,
+            0, 0, 5, 5, 0,
+            CopyFromParent,
+            InputOutput,
+            CopyFromParent,
+            mask,
+            &attr);
+
+        // make the window input‑transparent so it doesn't grab events
+        int shape_event, shape_error;
+        if (XShapeQueryExtension(cursor_marker.display, &shape_event, &shape_error))
+        {
+            XRectangle rect = {0, 0, 0, 0};
+            XShapeCombineRectangles(cursor_marker.display,
+                                    cursor_marker.window,
+                                    ShapeInput,
+                                    0, 0,
+                                    &rect,
+                                    1,
+                                    ShapeSet,
+                                    Unsorted);
+        }
+
+        XMapRaised(cursor_marker.display, cursor_marker.window);
+        XFlush(cursor_marker.display);
+    }
+
+    /**
+     * Destroys the cursor marker window and closes the display connection.
+     */
+    void destroy_cursor_marker()
+    {
+        if (cursor_marker.window && cursor_marker.display)
+        {
+            XDestroyWindow(cursor_marker.display, cursor_marker.window);
+            XCloseDisplay(cursor_marker.display);
+        }
+        cursor_marker.window = 0;
+        cursor_marker.display = nullptr;
+    }
+    
+    /**
+     * Checks if the cursor marker should be hidden due to inactivity (no updates for 3 seconds) and hides it if necessary.
+     */
+    void maybe_clear_marker()
+    {
+        std::lock_guard<std::mutex> lock(cursor_marker.mutex);
+        if (!cursor_marker.enabled)
+            return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - cursor_marker.last_time >= std::chrono::seconds(3))
+        {
+            destroy_cursor_marker();
+        }
+    }
+
+    /**
+     * Updates the position of the cursor marker to the given coordinates.
+     */
+    void update_cursor_marker(int x, int y, int flash_pid, int browser_pid)
+    {
+        if (!cursor_marker.enabled || flash_pid == -1 || !x11_window_control_available())
+            return;
+
+        // record last update time
+        {
+            std::lock_guard<std::mutex> lock(cursor_marker.mutex);
+            cursor_marker.last_time = std::chrono::steady_clock::now();
+        }
+
+        if (!cursor_marker.window)
+            create_cursor_marker();
+
+        if (cursor_marker.window && cursor_marker.display)
+        {
+            // translate coordinates from browser window space to root (screen) space
+            with_browser_window(flash_pid, browser_pid, [&](Display *display, Window window) {
+                Window root = DefaultRootWindow(display);
+                int root_x = 0, root_y = 0;
+                Window child = 0;
+                XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
+
+                // move marker on its own display (should be same as 'display' but we stored earlier when created)
+                XMoveWindow(cursor_marker.display, cursor_marker.window, root_x, root_y);
+                XFlush(cursor_marker.display);
+            });
+        }
+
+        // schedule a hide check in 3 seconds
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            maybe_clear_marker();
+        }).detach();
     }
 }
 
@@ -898,7 +1033,7 @@ void BotClient::MouseClick(int32_t x, int32_t y)
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         send_mouse_button(display, window, x, y, Button1, true, true);
     });
-    updateCursorMarker(x, y);
+    UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseMove(int32_t x, int32_t y)
@@ -906,7 +1041,7 @@ void BotClient::MouseMove(int32_t x, int32_t y)
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         send_mouse_move(display, window, x, y);
     });
-    updateCursorMarker(x, y);
+    UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseDown(int32_t x, int32_t y)
@@ -914,7 +1049,7 @@ void BotClient::MouseDown(int32_t x, int32_t y)
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         send_mouse_button(display, window, x, y, Button1, true, false);
     });
-    updateCursorMarker(x, y);
+    UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseUp(int32_t x, int32_t y)
@@ -922,7 +1057,7 @@ void BotClient::MouseUp(int32_t x, int32_t y)
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         send_mouse_button(display, window, x, y, Button1, false, true);
     });
-    updateCursorMarker(x, y);
+    UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
@@ -931,7 +1066,7 @@ void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
     with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         send_mouse_wheel(display, window, x, y, button);
     });
-    updateCursorMarker(x, y);
+    UpdateCursorMarker(x, y);
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
@@ -951,131 +1086,20 @@ int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check
     return response.sig.result;
 }
 
-// --- cursor marker helpers ------------------------------------------------
-
 void BotClient::EnableCursorMarker(bool enable)
 {
-    if (enable == m_cursor_marker_enabled)
+    if (enable == cursor_marker.enabled)
         return;
 
-    m_cursor_marker_enabled = enable;
+    cursor_marker.enabled = enable;
     if (!enable)
     {
-        if (m_marker_window && m_marker_display)
-        {
-            XDestroyWindow(m_marker_display, m_marker_window);
-            XCloseDisplay(m_marker_display);
-        }
-        m_marker_window = 0;
-        m_marker_display = nullptr;
+        std::lock_guard<std::mutex> lock(cursor_marker.mutex);
+        destroy_cursor_marker();
     }
 }
 
-void BotClient::createCursorMarker()
+void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
 {
-    if (!m_cursor_marker_enabled || m_marker_window)
-        return;
-
-    m_marker_display = XOpenDisplay(NULL);
-    if (!m_marker_display)
-        return;
-
-    int scr = DefaultScreen(m_marker_display);
-    Window root = RootWindow(m_marker_display, scr);
-
-    Colormap cmap = DefaultColormap(m_marker_display, scr);
-    XColor color;
-    XColor exact;
-    if (!XAllocNamedColor(m_marker_display, cmap, "red", &color, &exact))
-    {
-        color.pixel = 0; // fallback black
-    }
-
-    XSetWindowAttributes attr;
-    attr.override_redirect = True;
-    attr.background_pixel = color.pixel;
-    attr.background_pixmap = None;
-
-    unsigned long mask = CWOverrideRedirect | CWBackPixel;
-    m_marker_window = XCreateWindow(
-        m_marker_display,
-        root,
-        0, 0, 8, 8, 0,
-        CopyFromParent,
-        InputOutput,
-        CopyFromParent,
-        mask,
-        &attr);
-
-    // make the window input‑transparent so it doesn't grab events
-    int shape_event, shape_error;
-    if (XShapeQueryExtension(m_marker_display, &shape_event, &shape_error))
-    {
-        XRectangle rect = { 0, 0, 0, 0 };
-        XShapeCombineRectangles(m_marker_display,
-                                 m_marker_window,
-                                 ShapeInput,
-                                 0, 0,
-                                 &rect,
-                                 1,
-                                 ShapeSet,
-                                 Unsorted);
-    }
-
-    XMapRaised(m_marker_display, m_marker_window);
-    XFlush(m_marker_display);
-}
-
-void BotClient::updateCursorMarker(int x, int y)
-{
-    if (!m_cursor_marker_enabled)
-        return;
-
-    // record last update time
-    {
-        std::lock_guard<std::mutex> lock(m_marker_mutex);
-        m_last_marker_time = std::chrono::steady_clock::now();
-    }
-
-    if (!m_marker_window)
-        createCursorMarker();
-
-    if (m_marker_window && m_marker_display)
-    {
-        // translate coordinates from browser window space to root (screen) space
-        with_browser_window(m_flash_pid, m_browser_pid, [&](Display *display, Window window) {
-            Window root = DefaultRootWindow(display);
-            int root_x = 0, root_y = 0;
-            Window child = 0;
-            XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
-
-            // move marker on its own display (should be same as 'display' but we stored earlier when created)
-            XMoveWindow(m_marker_display, m_marker_window, root_x, root_y);
-            XFlush(m_marker_display);
-        });
-    }
-
-    // schedule a hide check in 3 seconds
-    std::thread([this]() {
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-        maybeClearMarker();
-    }).detach();
-}
-
-void BotClient::maybeClearMarker()
-{
-    std::lock_guard<std::mutex> lock(m_marker_mutex);
-    if (!m_cursor_marker_enabled)
-        return;
-    auto now = std::chrono::steady_clock::now();
-    if (now - m_last_marker_time >= std::chrono::seconds(3))
-    {
-        if (m_marker_window && m_marker_display)
-        {
-            XDestroyWindow(m_marker_display, m_marker_window);
-            XCloseDisplay(m_marker_display);
-        }
-        m_marker_window = 0;
-        m_marker_display = nullptr;
-    }
+    update_cursor_marker(x, y, m_flash_pid, m_browser_pid);
 }
