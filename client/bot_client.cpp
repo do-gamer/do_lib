@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
 #include <mutex>
 #include <thread>
 #include <chrono>
@@ -493,7 +494,10 @@ namespace mouse
 
 namespace cursor_marker
 {
-    // --- Cursor Marker state and helpers --- //
+    static constexpr int dot_size = 6; // 6x6 marker size
+    static constexpr const char *dot_color = "red";
+
+    // State for the cursor marker, including whether it's enabled.
     struct State
     {
         bool enabled = false;
@@ -517,9 +521,6 @@ namespace cursor_marker
 
         int scr = DefaultScreen(state.display);
         Window root = RootWindow(state.display, scr);
-
-        const int dot_size = 6; // 6x6 pixels marker
-        const char *dot_color = "red"; // marker color name
 
         Colormap cmap = DefaultColormap(state.display, scr);
         XColor color;
@@ -621,7 +622,7 @@ namespace cursor_marker
                 XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
 
                 // move marker on its own display (should be same as 'display' but we stored earlier when created)
-                const int offset = 3; // center correction for a 6x6 dot
+                const int offset = static_cast<int>(std::lround(dot_size / 2.0));
                 XMoveWindow(state.display, state.window, root_x - offset, root_y - offset);
                 XFlush(state.display);
             });
