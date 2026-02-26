@@ -1,0 +1,38 @@
+{
+  "name": "darkbot_browser",
+  "version": "1.2.3",
+  "description": "DarkBot Browser",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "build": "electron-builder --publish always"
+  },
+  "author": "DarkBot Team",
+  "build": {
+    "appId": "eu.darkbot.browser",
+    "productName": "darkbot_browser",
+    "artifactName": "darkbot_browser_linux.AppImage",
+    "asar": true,
+    "npmRebuild": true,
+    "buildDependenciesFromSource": false,
+    "directories": {
+      "buildResources": "res"
+    },
+    "linux": {
+      "target": "AppImage",
+      "extraResources": [
+        "./res/icon.png",
+        "./res/linux/libpepflashplayer.so"
+      ],
+      "category": "Game"
+    }
+  },
+  "dependencies": {
+    "@trodi/electron-splashscreen": "^1.0.2"
+  },
+  "devDependencies": {
+    "electron": "11.5.0",
+    "electron-builder": "^23.6.0"
+  }
+}

@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <unistd.h>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -756,6 +757,14 @@ void sigchld_handler(int signal)
 
 void BotClient::LaunchBrowser()
 {
+    const char *fpath = "lib/darkbot_browser_linux.AppImage";
+    /* ensure the browser binary exists before attempting to fork/exec */
+    if (access(fpath, F_OK) != 0)
+    {
+        fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
+        return;
+    }
+
     int pid = fork();
 
     switch (pid)
@@ -767,8 +776,6 @@ void BotClient::LaunchBrowser()
         }
         case 0:
         {
-            const char *fpath = "lib/backpage-linux-x86_64.AppImage";
-
             std::vector<const char *> envp
             {
                 "LD_PRELOAD=lib/libdo_lib.so",
