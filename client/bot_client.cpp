@@ -438,6 +438,7 @@ namespace mouse
         event.xbutton.y = ctx.local_y;
         event.xbutton.x_root = ctx.root_x + ctx.local_x;
         event.xbutton.y_root = ctx.root_y + ctx.local_y;
+        event.xbutton.send_event = True;
         event.xbutton.same_screen = True;
     }
 
@@ -452,7 +453,7 @@ namespace mouse
 
         XEvent event;
         fill_event_common(event, ctx);
-        event.xmotion.type = MotionNotify;
+        event.type = MotionNotify;
 
         XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
     }
@@ -472,13 +473,13 @@ namespace mouse
 
         if (press)
         {
-            event.xbutton.type = ButtonPress;
+            event.type = ButtonPress;
             XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event);
         }
 
         if (release)
         {
-            event.xbutton.type = ButtonRelease;
+            event.type = ButtonRelease;
             XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event);
         }
     }
