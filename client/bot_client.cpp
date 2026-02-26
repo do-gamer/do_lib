@@ -25,11 +25,11 @@
 
 #define MEM_SIZE 1024
 
-namespace
+namespace window
 {
-    Window browser_window = 0;
+    Window browser = 0;
 
-    struct WindowProperty
+    struct Property
     {
         Atom actual_type = None;
         int actual_format = 0;
@@ -41,28 +41,28 @@ namespace
     /**
      * Helper function to free the memory allocated by XGetWindowProperty and reset the WindowProperty structure.
      */
-    void free_window_property(WindowProperty &prop)
+    void free_property(Property &property)
     {
-        if (prop.prop)
+        if (property.prop)
         {
-            XFree(prop.prop);
+            XFree(property.prop);
         }
-        prop.actual_type = None;
-        prop.actual_format = 0;
-        prop.nitems = 0;
-        prop.bytes_after = 0;
-        prop.prop = nullptr;
+        property.actual_type = None;
+        property.actual_format = 0;
+        property.nitems = 0;
+        property.bytes_after = 0;
+        property.prop = nullptr;
     }
 
     /**
      * Helper function to get a window property with proper error handling and type checking.
      */
-    bool get_window_property(Display *display,
-                             Window window,
-                             Atom property,
-                             Atom type,
-                             long length,
-                             WindowProperty &out)
+    bool get_property(Display *display,
+                      Window window,
+                      Atom property,
+                      Atom type,
+                      long length,
+                      Property &out)
     {
         if (!display || property == None)
         {
@@ -82,7 +82,7 @@ namespace
     /**
      * Helper function to get the PID of the process owning a window, using the _NET_WM_PID property.
      */
-    bool get_window_pid(Display *display, Window window, pid_t &pid)
+    bool get_pid(Display *display, Window window, pid_t &pid)
     {
         Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
         if (atom_pid == None)
@@ -90,24 +90,24 @@ namespace
             return false;
         }
 
-        WindowProperty prop;
-        bool property_ok = get_window_property(display, window, atom_pid, XA_CARDINAL, 1, prop);
+        Property property;
+        bool read_ok = get_property(display, window, atom_pid, XA_CARDINAL, 1, property);
 
-        if (!property_ok || !prop.prop || prop.nitems == 0)
+        if (!read_ok || !property.prop || property.nitems == 0)
         {
-            free_window_property(prop);
+            free_property(property);
             return false;
         }
 
-        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop.prop));
-        free_window_property(prop);
+        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(property.prop));
+        free_property(property);
         return true;
     }
 
     /**
      * Helper function to check if a given PID is the browser process or a child of it.
      */
-    bool is_browser_window_pid(pid_t owner_pid, pid_t browser_pid)
+    bool is_browser_pid(pid_t owner_pid, pid_t browser_pid)
     {
         return owner_pid == browser_pid || ProcUtil::IsChildOf(owner_pid, browser_pid);
     }
@@ -115,7 +115,7 @@ namespace
     /**
      * Checks if X11 window control is available by verifying the DISPLAY environment variable.
      */
-    bool x11_window_control_available()
+    bool x11_control_available()
     {
         const char *display = std::getenv("DISPLAY");
         return display && *display;
@@ -124,7 +124,7 @@ namespace
     /**
      * Helper function to attempt to get window attributes, handling potential X11 errors gracefully.
      */
-    bool try_get_window_attrs(Display *display, Window window)
+    bool try_get_attrs(Display *display, Window window)
     {
         XWindowAttributes attrs;
         if (XGetWindowAttributes(display, window, &attrs) != 0)
@@ -188,7 +188,7 @@ namespace
         }
 
         pid_t owner_pid = -1;
-        if (get_window_pid(display, root, owner_pid) && is_browser_window_pid(owner_pid, browser_pid))
+        if (get_pid(display, root, owner_pid) && is_browser_pid(owner_pid, browser_pid))
         {
             return root;
         }
@@ -219,30 +219,30 @@ namespace
     /**
      * Main function to find the browser window by first checking the _NET_CLIENT_LIST for windows owned by the browser PID.
      */
-    Window find_browser_client_window(Display *display, pid_t browser_pid)
+    Window find_browser_client(Display *display, pid_t browser_pid)
     {
         Window root = DefaultRootWindow(display);
         Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
         if (atom_client_list != None)
         {
-            WindowProperty prop;
-            bool property_ok = get_window_property(display, root, atom_client_list, XA_WINDOW, 4096, prop);
+            Property property;
+            bool read_ok = get_property(display, root, atom_client_list, XA_WINDOW, 4096, property);
 
-            if (property_ok && prop.prop && prop.actual_type == XA_WINDOW)
+            if (read_ok && property.prop && property.actual_type == XA_WINDOW)
             {
-                Window *windows = reinterpret_cast<Window *>(prop.prop);
+                Window *windows = reinterpret_cast<Window *>(property.prop);
                 Window child_fallback = 0;
-                for (unsigned long i = 0; i < prop.nitems; i++)
+                for (unsigned long i = 0; i < property.nitems; i++)
                 {
                     pid_t owner_pid = -1;
-                    if (!get_window_pid(display, windows[i], owner_pid))
+                    if (!get_pid(display, windows[i], owner_pid))
                     {
                         continue;
                     }
 
                     if (owner_pid == browser_pid)
                     {
-                        free_window_property(prop);
+                        free_property(property);
                         return windows[i];
                     }
 
@@ -254,14 +254,14 @@ namespace
 
                 if (child_fallback)
                 {
-                    free_window_property(prop);
+                    free_property(property);
                     return child_fallback;
                 }
             }
 
-            free_window_property(prop);
+            free_property(property);
         }
-        
+
         Window any_owned = find_browser_owned_descendant_recursive(display, root, browser_pid);
         if (!any_owned)
         {
@@ -283,11 +283,11 @@ namespace
             return false;
         }
 
-        WindowProperty prop;
-        bool property_ok = get_window_property(display, window, wm_state, wm_state, 2, prop);
-        bool has_state = property_ok && prop.actual_type == wm_state && prop.nitems > 0;
+        Property property;
+        bool read_ok = get_property(display, window, wm_state, wm_state, 2, property);
+        bool has_state = read_ok && property.actual_type == wm_state && property.nitems > 0;
 
-        free_window_property(prop);
+        free_property(property);
         return has_state;
     }
 
@@ -295,14 +295,14 @@ namespace
      * Main function to resolve the actual client window of the browser,
      * which may involve checking the top-level window and its children
      */
-    Window resolve_client_window(Display *display, pid_t browser_pid)
+    Window resolve_client(Display *display, pid_t browser_pid)
     {
         if (!display)
         {
             return 0;
         }
 
-        Window window = find_browser_client_window(display, browser_pid);
+        Window window = find_browser_client(display, browser_pid);
         if (!window)
         {
             return 0;
@@ -345,9 +345,9 @@ namespace
      * Helper function to execute an action in the context of the browser window.
      */
     template<typename Func>
-    void with_browser_window(int flash_pid, int browser_pid, Func&& action)
+    void with_browser(int flash_pid, int browser_pid, Func&& action)
     {
-        if (flash_pid == -1 || !x11_window_control_available())
+        if (flash_pid == -1 || !x11_control_available())
         {
             return;
         }
@@ -358,21 +358,24 @@ namespace
             return;
         }
 
-        if (!browser_window || !try_get_window_attrs(display, browser_window))
+        if (!browser || !try_get_attrs(display, browser))
         {
-            browser_window = resolve_client_window(display, browser_pid);
+            browser = resolve_client(display, browser_pid);
         }
 
-        if (browser_window)
+        if (browser)
         {
-            action(display, browser_window);
+            action(display, browser);
         }
 
         XFlush(display);
         XCloseDisplay(display);
     }
+}
 
-    struct MouseEventContext
+namespace mouse
+{
+    struct EventContext
     {
         Display *display;
         Window window;
@@ -384,7 +387,7 @@ namespace
     /**
      * Prepares the context for a mouse event by translating local coordinates to root coordinates.
      */
-    bool prepare_mouse_event(Display *display, Window window, int32_t x, int32_t y, MouseEventContext &ctx)
+    bool prepare_event(Display *display, Window window, int32_t x, int32_t y, EventContext &ctx)
     {
         if (!display || !window)
         {
@@ -422,7 +425,7 @@ namespace
     /**
      * Fills the common fields of an XEvent structure for mouse events, based on the provided context.
      */
-    void fill_mouse_event_common(XEvent &event, const MouseEventContext &ctx)
+    void fill_event_common(XEvent &event, const EventContext &ctx)
     {
         std::memset(&event, 0, sizeof(event));
         event.xany.display = ctx.display;
@@ -440,14 +443,14 @@ namespace
     /**
      * Sends a mouse move event.
      */
-    void send_mouse_move(Display *display, Window window, int32_t x, int32_t y)
+    void send_move(Display *display, Window window, int32_t x, int32_t y)
     {
-        MouseEventContext ctx;
-        if (!prepare_mouse_event(display, window, x, y, ctx))
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
             return;
 
         XEvent event;
-        fill_mouse_event_common(event, ctx);
+        fill_event_common(event, ctx);
         event.xmotion.type = MotionNotify;
 
         XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
@@ -456,14 +459,14 @@ namespace
     /**
      * Sends mouse button press/release events.
      */
-    void send_mouse_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    void send_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
     {
-        MouseEventContext ctx;
-        if (!prepare_mouse_event(display, window, x, y, ctx))
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
             return;
 
         XEvent event;
-        fill_mouse_event_common(event, ctx);
+        fill_event_common(event, ctx);
         event.xbutton.button = button;
 
         if (press)
@@ -482,14 +485,16 @@ namespace
     /**
      * Sends a mouse wheel event.
      */
-    void send_mouse_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
+    void send_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
-        send_mouse_button(display, window, x, y, button, true, true);
+        send_button(display, window, x, y, button, true, true);
     }
+}
 
-   
+namespace cursor_marker
+{
     // --- Cursor Marker state and helpers --- //
-    struct CursorMarkerState
+    struct State
     {
         bool enabled = false;
         Display *display = nullptr;
@@ -498,28 +503,28 @@ namespace
         std::mutex mutex;
     };
 
-    static CursorMarkerState cursor_marker;
+    static State state;
 
     /**
      * Creates a small red window that will serve as a marker for the virtual cursor position.
      * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
      */
-    void create_cursor_marker()
+    void create()
     {
-        cursor_marker.display = XOpenDisplay(NULL);
-        if (!cursor_marker.display)
+        state.display = XOpenDisplay(NULL);
+        if (!state.display)
             return;
 
-        int scr = DefaultScreen(cursor_marker.display);
-        Window root = RootWindow(cursor_marker.display, scr);
-        
+        int scr = DefaultScreen(state.display);
+        Window root = RootWindow(state.display, scr);
+
         const int dot_size = 6; // 6x6 pixels marker
         const char *dot_color = "red"; // marker color name
 
-        Colormap cmap = DefaultColormap(cursor_marker.display, scr);
+        Colormap cmap = DefaultColormap(state.display, scr);
         XColor color;
         XColor exact;
-        if (!XAllocNamedColor(cursor_marker.display, cmap, dot_color, &color, &exact))
+        if (!XAllocNamedColor(state.display, cmap, dot_color, &color, &exact))
         {
             color.pixel = 0; // fallback black
         }
@@ -530,8 +535,8 @@ namespace
         attr.background_pixmap = None;
 
         unsigned long mask = CWOverrideRedirect | CWBackPixel;
-        cursor_marker.window = XCreateWindow(
-            cursor_marker.display,
+        state.window = XCreateWindow(
+            state.display,
             root,
             0, 0, dot_size, dot_size, 0,
             CopyFromParent,
@@ -542,11 +547,11 @@ namespace
 
         // make the window input‑transparent so it doesn't grab events
         int shape_event, shape_error;
-        if (XShapeQueryExtension(cursor_marker.display, &shape_event, &shape_error))
+        if (XShapeQueryExtension(state.display, &shape_event, &shape_error))
         {
             XRectangle rect = {0, 0, 0, 0};
-            XShapeCombineRectangles(cursor_marker.display,
-                                    cursor_marker.window,
+            XShapeCombineRectangles(state.display,
+                                    state.window,
                                     ShapeInput,
                                     0, 0,
                                     &rect,
@@ -555,61 +560,61 @@ namespace
                                     Unsorted);
         }
 
-        XMapRaised(cursor_marker.display, cursor_marker.window);
-        XFlush(cursor_marker.display);
+        XMapRaised(state.display, state.window);
+        XFlush(state.display);
     }
 
     /**
      * Destroys the cursor marker window and closes the display connection.
      */
-    void destroy_cursor_marker()
+    void destroy()
     {
-        if (cursor_marker.window && cursor_marker.display)
+        if (state.window && state.display)
         {
-            XDestroyWindow(cursor_marker.display, cursor_marker.window);
-            XCloseDisplay(cursor_marker.display);
+            XDestroyWindow(state.display, state.window);
+            XCloseDisplay(state.display);
         }
-        cursor_marker.window = 0;
-        cursor_marker.display = nullptr;
+        state.window = 0;
+        state.display = nullptr;
     }
-    
+
     /**
      * Checks if the cursor marker should be hidden due to inactivity (no updates for 3 seconds) and hides it if necessary.
      */
-    void maybe_clear_marker()
+    void maybe_clear()
     {
-        std::lock_guard<std::mutex> lock(cursor_marker.mutex);
-        if (!cursor_marker.enabled)
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.enabled)
             return;
 
         auto now = std::chrono::steady_clock::now();
-        if (now - cursor_marker.last_time >= std::chrono::seconds(3))
+        if (now - state.last_time >= std::chrono::seconds(3))
         {
-            destroy_cursor_marker();
+            destroy();
         }
     }
 
     /**
      * Updates the position of the cursor marker to the given coordinates.
      */
-    void update_cursor_marker(int x, int y, int flash_pid, int browser_pid)
+    void update(int x, int y, int flash_pid, int browser_pid)
     {
-        if (!cursor_marker.enabled || flash_pid == -1 || !x11_window_control_available())
+        if (!state.enabled || flash_pid == -1 || !window::x11_control_available())
             return;
 
         // record last update time
         {
-            std::lock_guard<std::mutex> lock(cursor_marker.mutex);
-            cursor_marker.last_time = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.last_time = std::chrono::steady_clock::now();
         }
 
-        if (!cursor_marker.window)
-            create_cursor_marker();
+        if (!state.window)
+            create();
 
-        if (cursor_marker.window && cursor_marker.display)
+        if (state.window && state.display)
         {
             // translate coordinates from browser window space to root (screen) space
-            with_browser_window(flash_pid, browser_pid, [&](Display *display, Window window) {
+            window::with_browser(flash_pid, browser_pid, [&](Display *display, Window window) {
                 Window root = DefaultRootWindow(display);
                 int root_x = 0, root_y = 0;
                 Window child = 0;
@@ -617,15 +622,15 @@ namespace
 
                 // move marker on its own display (should be same as 'display' but we stored earlier when created)
                 const int offset = 3; // center correction for a 6x6 dot
-                XMoveWindow(cursor_marker.display, cursor_marker.window, root_x - offset, root_y - offset);
-                XFlush(cursor_marker.display);
+                XMoveWindow(state.display, state.window, root_x - offset, root_y - offset);
+                XFlush(state.display);
             });
         }
 
         // schedule a hide check in 3 seconds
         std::thread([]() {
             std::this_thread::sleep_for(std::chrono::seconds(3));
-            maybe_clear_marker();
+            maybe_clear();
         }).detach();
     }
 }
@@ -728,7 +733,7 @@ BotClient::BotClient() :
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
         visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
     });
 }
@@ -1033,32 +1038,32 @@ bool BotClient::ClickKey(uint32_t key)
 
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        send_mouse_button(display, window, x, y, Button1, true, true);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, true, true);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseMove(int32_t x, int32_t y)
 {
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        send_mouse_move(display, window, x, y);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_move(display, window, x, y);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseDown(int32_t x, int32_t y)
 {
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        send_mouse_button(display, window, x, y, Button1, true, false);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, true, false);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseUp(int32_t x, int32_t y)
 {
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        send_mouse_button(display, window, x, y, Button1, false, true);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, false, true);
     });
     UpdateCursorMarker(x, y);
 }
@@ -1066,8 +1071,8 @@ void BotClient::MouseUp(int32_t x, int32_t y)
 void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
     int button = delta >= 0 ? Button4 : Button5;
-    with_browser_window(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
-        send_mouse_wheel(display, window, x, y, button);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_wheel(display, window, x, y, button);
     });
     UpdateCursorMarker(x, y);
 }
@@ -1091,18 +1096,18 @@ int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check
 
 void BotClient::EnableCursorMarker(bool enable)
 {
-    if (enable == cursor_marker.enabled)
+    if (enable == cursor_marker::state.enabled)
         return;
 
-    cursor_marker.enabled = enable;
+    cursor_marker::state.enabled = enable;
     if (!enable)
     {
-        std::lock_guard<std::mutex> lock(cursor_marker.mutex);
-        destroy_cursor_marker();
+        std::lock_guard<std::mutex> lock(cursor_marker::state.mutex);
+        cursor_marker::destroy();
     }
 }
 
 void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
 {
-    update_cursor_marker(x, y, m_flash_pid, m_browser_pid);
+    cursor_marker::update(x, y, m_flash_pid, m_browser_pid);
 }
