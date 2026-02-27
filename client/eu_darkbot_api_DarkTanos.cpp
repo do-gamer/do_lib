@@ -10,7 +10,6 @@
 #include "utils.h"
 
 static BotClient client;
-static std::mutex post_actions_mutex;
 
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setData
@@ -131,81 +130,16 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
   (JNIEnv *env, jobject, jlongArray jactions)
 {
     if (!jactions)
-    {
         return;
-    }
 
     jsize len = env->GetArrayLength(jactions);
     if (len <= 0)
-    {
         return;
-    }
 
-    std::lock_guard<std::mutex> actions_lock(post_actions_mutex);
+    std::vector<uint64_t> actions(static_cast<size_t>(len));
+    env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
 
-    std::vector<jlong> actions(static_cast<size_t>(len));
-    env->GetLongArrayRegion(jactions, 0, len, actions.data());
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
-
-    for (jsize i = 0; i < len; ++i)
-    {
-        if (std::chrono::steady_clock::now() >= deadline)
-        {
-          break;
-        }
-
-        jlong action = actions[static_cast<size_t>(i)];
-        uint64_t value = static_cast<uint64_t>(action);
-        uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
-        int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
-        int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
-        int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
-
-        int32_t x = static_cast<int32_t>(lparam_low);
-        int32_t y = static_cast<int32_t>(lparam_high);
-        uint32_t key = static_cast<uint32_t>(wparam);
-
-        // Handle native mouse and keyboard events based on the message type.
-        // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
-
-        switch (message)
-        {
-        case 0x1FF: // Mouse CLICK
-            client.MouseClick(x, y);
-            break;
-        case 0x200: // Mouse MOVE
-            client.MouseMove(x, y);
-            break;
-        case 0x201: // Mouse DOWN
-            client.MouseDown(x, y);
-            break;
-        case 0x202: // Mouse UP
-            client.MouseUp(x, y);
-            break;
-        case 0x20A: // Mouse WHEEL
-            client.MouseScroll(x, y, wparam);
-            break;
-        case 0x1FE: // Key CLICK
-            client.KeyClick(key);
-            break;
-        case 0x100: // Key DOWN
-            client.KeyDown(key);
-            break;
-        case 0x101: // Key UP
-            client.KeyUp(key);
-            break;
-        case 0x102: // Key CHAR
-            {
-                std::string text(1, static_cast<char>(wparam));
-                client.SendText(text);
-            }
-            break;
-        default:
-            // Unsupported message, ignore
-            break;
-        }
-    }
+    client.PostActions(actions);
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_readInt

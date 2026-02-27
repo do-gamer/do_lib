@@ -130,14 +130,4 @@ function handleKeyUp(webContents, code) {
     dispatchKeyEvent(webContents, code, false, true);
 }
 
-/**
- * Sends a string of text as individual key events.
- */
-function handleText(webContents, str) {
-    for (let i = 0; i < str.length; i++) {
-        const chr = str[i];
-        dispatchKeyEvent(webContents, chr, true, true);
-    }
-}
-
-module.exports = { handleKeyClick, handleKeyDown, handleKeyUp, handleText };
+module.exports = { handleKeyClick, handleKeyDown, handleKeyUp };

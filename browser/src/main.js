@@ -34,7 +34,7 @@ var server = net.createServer(function (sock) {
                     handleKeyUp(mainWindow.webContents, args[1]);
                     break;
                 case "text":
-                    handleText(mainWindow.webContents, args[1]);
+                    mainWindow.webContents.insertText(args[1]);
                     break;
             }
         }

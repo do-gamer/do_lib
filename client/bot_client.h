@@ -1,6 +1,7 @@
 #ifndef BOT_CLIENT_H
 #define BOT_CLIENT_H
 #include <memory>
+#include <mutex>
 #include "proc_util.h"
 
 class SockIpc;
@@ -45,6 +46,9 @@ public:
     void MouseUp(int32_t x, int32_t y);
     void MouseScroll(int32_t x, int32_t y, int32_t delta);
     int CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig);
+
+    // batch processing of native actions coming from the Java layer
+    void PostActions(const std::vector<uint64_t> &actions);
 
     // testing helper - show a red dot at the virtual cursor position
     void EnableCursorMarker(bool enable);
@@ -117,6 +121,9 @@ private:
     int m_flash_shmid = -1;
 
     int m_browser_pid = -1, m_flash_pid = -1;
+
+    // protects PostActions from concurrent invocation
+    std::mutex m_post_actions_mutex;
 
     bool find_flash_process();
     void reset();

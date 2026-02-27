@@ -1091,6 +1091,69 @@ void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
     UpdateCursorMarker(x, y);
 }
 
+// process a batch of encoded native actions.
+void BotClient::PostActions(const std::vector<uint64_t> &actions)
+{
+    std::lock_guard<std::mutex> lock(m_post_actions_mutex);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+
+    for (uint64_t value : actions)
+    {
+        if (std::chrono::steady_clock::now() >= deadline)
+            break;
+
+        uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
+        int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
+        int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
+        int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
+
+        int32_t x = static_cast<int32_t>(lparam_low);
+        int32_t y = static_cast<int32_t>(lparam_high);
+        uint32_t key = static_cast<uint32_t>(wparam);
+
+        // Handle native mouse and keyboard events based on the message type.
+        // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
+
+        switch (message)
+        {
+            case 0x1FF: // Mouse CLICK
+                MouseClick(x, y);
+                break;
+            case 0x200: // Mouse MOVE
+                MouseMove(x, y);
+                break;
+            case 0x201: // Mouse DOWN
+                MouseDown(x, y);
+                break;
+            case 0x202: // Mouse UP
+                MouseUp(x, y);
+                break;
+            case 0x20A: // Mouse WHEEL
+                MouseScroll(x, y, wparam);
+                break;
+            case 0x1FE: // Key CLICK
+                KeyClick(key);
+                break;
+            case 0x100: // Key DOWN
+                KeyDown(key);
+                break;
+            case 0x101: // Key UP
+                KeyUp(key);
+                break;
+            case 0x102: // Key CHAR
+                {
+                    std::string text(1, static_cast<char>(wparam));
+                    SendText(text);
+                }
+                break;
+            default:
+                // unsupported message, ignore
+                break;
+        }
+    }
+}
+
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
 {
     Message message;
