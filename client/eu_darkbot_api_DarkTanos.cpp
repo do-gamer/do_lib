@@ -5,6 +5,7 @@
 #include <vector>
 #include <mutex>
 #include <chrono>
+#include <thread>
 
 #include "bot_client.h"
 #include "utils.h"
@@ -93,6 +94,51 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
     std::string text = cstr;
     env->ReleaseStringUTFChars(jtext, cstr);
     client.SendText(text);
+}
+
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_pasteText
+  (JNIEnv *env, jobject, jstring jtext, jlongArray jactions)
+{
+    // convert string
+    const char *cstr = env->GetStringUTFChars(jtext, NULL);
+    std::string text = cstr;
+    env->ReleaseStringUTFChars(jtext, cstr);
+
+    // convert actions array
+    std::vector<uint64_t> actions;
+    if (jactions) {
+        jsize len = env->GetArrayLength(jactions);
+        if (len > 0) {
+            actions.resize(static_cast<size_t>(len));
+            env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
+        }
+    }
+
+    // split inline: before (no after flag) and after (has after flag)
+    const uint64_t AFTER_MASK = (1ULL << 63);
+    std::vector<uint64_t> before;
+    std::vector<uint64_t> after;
+    for (uint64_t v : actions) {
+        if (v & AFTER_MASK)
+            after.push_back(v);
+        else
+            before.push_back(v);
+    }
+
+    // execute before actions
+    if (!before.empty()) {
+        client.PostActions(before);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // small delay
+    }
+
+    // send text
+    client.SendText(text);
+
+    // execute after actions
+    if (!after.empty()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // small delay
+        client.PostActions(after);
+    }
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove

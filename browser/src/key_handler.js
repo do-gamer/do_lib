@@ -130,4 +130,11 @@ function handleKeyUp(webContents, code) {
     dispatchKeyEvent(webContents, code, false, true);
 }
 
-module.exports = { handleKeyClick, handleKeyDown, handleKeyUp };
+async function typeText(webContents, text) {
+    for (const ch of text) {
+        webContents.sendInputEvent({ type: 'char', keyCode: ch });
+        await new Promise(r => setTimeout(r, 5)); // small delay
+    }
+}
+
+module.exports = { handleKeyClick, handleKeyDown, handleKeyUp, typeText };

@@ -7,12 +7,12 @@ let mainWindow;
 
 app.commandLine.appendSwitch('ppapi-flash-path', getFlashPath())
 
-const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
+const { handleKeyClick, handleKeyDown, handleKeyUp, typeText } = require('./key_handler');
 
 var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
-    sock.on('data', (data) => {
+    sock.on('data', async (data) => {
         let args = data.split("|");
 
         if (args.length == 0 || !mainWindow)
@@ -34,7 +34,7 @@ var server = net.createServer(function (sock) {
                     handleKeyUp(mainWindow.webContents, args[1]);
                     break;
                 case "text":
-                    mainWindow.webContents.insertText(args[1]);
+                    await typeText(mainWindow.webContents, args[1]);
                     break;
             }
         }

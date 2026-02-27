@@ -97,6 +97,14 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
 
 /*
  * Class:     eu_darkbot_api_DarkTanos
+ * Method:    pasteText
+ * Signature: (Ljava/lang/String;[J)V
+ */
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_pasteText
+  (JNIEnv *, jobject, jstring, jlongArray);
+
+/*
+ * Class:     eu_darkbot_api_DarkTanos
  * Method:    mouseMove
  * Signature: (II)V
  */
