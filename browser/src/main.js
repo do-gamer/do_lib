@@ -62,9 +62,9 @@ function createWindow(url, sid, launchGame = false) {
             webPreferences: {
                 plugins: true,
                 sandbox: false,
-                // nodeIntegration: true,
-                // contextIsolation: false,
-                // enableRemoteModule: true,
+                contextIsolation: true,
+                nodeIntegration: false,
+                enableRemoteModule: false,
                 preload: path.join(__dirname, 'preload.js')
             }
         },
@@ -73,7 +73,10 @@ function createWindow(url, sid, launchGame = false) {
             width: 300,
             height: 300,
             transparent: true,
-            alwaysOnTop: true
+            alwaysOnTop: true,
+            webPreferences: {
+                contextIsolation: true
+            }
         },
         minVisible: 0,
         delay: 0
