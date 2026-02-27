@@ -7,6 +7,8 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
+#include <vector>
+#include <sstream>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -647,7 +649,6 @@ enum class MessageType
     REFINE,
     UPGRADE,
     USE_ITEM,
-    KEY_CLICK,
     CHECK_SIGNATURE,
 
     NONE
@@ -698,12 +699,6 @@ struct UseItemMessage
 
 };
 
-struct KeyClickMessage
-{
-    MessageType type = MessageType::KEY_CLICK;
-    uint32_t key;
-};
-
 struct GetSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -724,7 +719,6 @@ union Message
     SendNotificationMessage notify;
     RefineMessage refine;
     UseItemMessage item;
-    KeyClickMessage key;
     GetSignatureMessage sig;
 };
 
@@ -1036,13 +1030,24 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
     return response.result.value;
 }
 
-bool BotClient::ClickKey(uint32_t key)
+void BotClient::KeyClick(uint32_t key)
 {
-    Message message;
-    message.type = MessageType::KEY_CLICK;
-    message.key.key = key;
-    SendFlashCommand(&message);
-    return true;
+    SendBrowserCommand(utils::format("keyClick|{}", key), 1);
+}
+
+void BotClient::KeyDown(uint32_t key)
+{
+    SendBrowserCommand(utils::format("keyDown|{}", key), 1);
+}
+
+void BotClient::KeyUp(uint32_t key)
+{
+    SendBrowserCommand(utils::format("keyUp|{}", key), 1);
+}
+
+void BotClient::SendText(const std::string &text)
+{
+    SendBrowserCommand("text|" + text, 1);
 }
 
 void BotClient::MouseClick(int32_t x, int32_t y)

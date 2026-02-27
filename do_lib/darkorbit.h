@@ -143,8 +143,6 @@ public:
         return r;
     }
 
-    bool key_click(uint32_t key);
-
     bool lock_entity(uint32_t id);
 
     bool refine_ore(uint32_t ore, uint32_t amount);

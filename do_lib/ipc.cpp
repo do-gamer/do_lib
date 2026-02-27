@@ -35,7 +35,6 @@ enum class MessageType
     REFINE,
     UPGRADE,
     USE_ITEM,
-    KEY_CLICK,
     CHECK_SIGNATURE,
     NONE
 
@@ -86,12 +85,6 @@ struct UseItemMessage
 
 };
 
-struct KeyClickMessage
-{
-    MessageType type = MessageType::KEY_CLICK;
-    uint32_t key;
-};
-
 struct CheckSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -112,7 +105,6 @@ union Message
     SendNotificationMessage notify;
     RefineMessage refine;
     UseItemMessage item;
-    KeyClickMessage key;
     CheckSignatureMessage sig;
 };
 
@@ -277,22 +269,6 @@ void Ipc::handle_message()
             auto res = Darkorbit::get().call_sync([ore=msg->ore, amount=msg->amount]
             {
                 return Darkorbit::get().refine_ore(ore, amount);
-            });
-
-            if (res.wait_for(5000ms) != std::future_status::ready)
-            {
-                result->error = true;
-                result->type = MessageType::RESULT;
-            }
-
-            break;
-        }
-        case MessageType::KEY_CLICK:
-        {
-            auto *msg = reinterpret_cast<KeyClickMessage *>(m_shared);
-            auto res = Darkorbit::get().call_sync([key=msg->key]
-            {
-                return Darkorbit::get().key_click(key);
             });
 
             if (res.wait_for(5000ms) != std::future_status::ready)

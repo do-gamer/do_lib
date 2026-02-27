@@ -84,8 +84,7 @@ JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_getVersion
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_keyClick
   (JNIEnv *, jobject, jint c)
 {
-    //client.SendBrowserCommand(utils::format("pressKey|{}", c), 1);
-    client.ClickKey(c);
+    client.KeyClick(c);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
@@ -94,7 +93,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
     const char *cstr = env->GetStringUTFChars(jtext, NULL);
     std::string text = cstr;
     env->ReleaseStringUTFChars(jtext, cstr);
-    client.SendBrowserCommand("text|" + text, 1);
+    client.SendText(text);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove
@@ -188,10 +187,19 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
             client.MouseScroll(x, y, wparam);
             break;
         case 0x1FE: // Key CLICK
-        // case 0x100: // Key DOWN
-        // case 0x101: // Key UP
+            client.KeyClick(key);
+            break;
+        case 0x100: // Key DOWN
+            client.KeyDown(key);
+            break;
+        case 0x101: // Key UP
+            client.KeyUp(key);
+            break;
         case 0x102: // Key CHAR
-            client.ClickKey(key);
+            {
+                std::string text(1, static_cast<char>(wparam));
+                client.SendText(text);
+            }
             break;
         default:
             // Unsupported message, ignore

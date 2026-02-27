@@ -35,7 +35,10 @@ public:
     bool SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args);
     bool UseItem(const std::string &name, uint8_t type, uint8_t bar);
     uintptr_t CallMethod(uintptr_t obj, uint32_t index, const std::vector<uintptr_t> &args);
-    bool ClickKey(uint32_t key);
+    void KeyClick(uint32_t key);
+    void KeyDown(uint32_t key);
+    void KeyUp(uint32_t key);
+    void SendText(const std::string &text);
     void MouseClick(int32_t x, int32_t y);
     void MouseMove(int32_t x, int32_t y);
     void MouseDown(int32_t x, int32_t y);

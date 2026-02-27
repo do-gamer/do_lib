@@ -171,13 +171,6 @@ void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t
     m_async_calls.clear();
 }
 
-bool Darkorbit::key_click(uint32_t key)
-{
-    auto *kbmapper = m_event_manager->get_at<avm::ScriptObject *>(0x68);
-    kbmapper->call(3, static_cast<Atom>(key));
-    return true;
-}
-
 bool Darkorbit::lock_entity(uint32_t id)
 {
     utils::log("[*] Trying to lock entity {}\n", id);

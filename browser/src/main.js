@@ -7,6 +7,8 @@ let mainWindow;
 
 app.commandLine.appendSwitch('ppapi-flash-path', getFlashPath())
 
+const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
+
 var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
@@ -20,11 +22,21 @@ var server = net.createServer(function (sock) {
 
         if (args[0] == "refresh") {
            mainWindow.reload();
-        } else if (args[0] == "minimize" && args.length == 2) {
-            if (args[1] == "1")
-                mainWindow.hide();
-            else
-                mainWindow.show();
+        } else if (args.length == 2) {
+            switch (args[0]) {
+                case "keyClick":
+                    handleKeyClick(mainWindow.webContents, args[1]);
+                    break
+                case "keyDown":
+                    handleKeyDown(mainWindow.webContents, args[1]);
+                    break;
+                case "keyUp":
+                    handleKeyUp(mainWindow.webContents, args[1]);
+                    break;
+                case "text":
+                    handleText(mainWindow.webContents, args[1]);
+                    break;
+            }
         }
     });
 
