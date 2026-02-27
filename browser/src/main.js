@@ -58,7 +58,7 @@ function createWindow(url, sid, launchGame = false) {
             show: false,
             darkTheme: true,
             autoHideMenuBar: true,
-            title: "DarkBot Browser",
+            title: "DarkBot Browser v" + app.getVersion(),
             webPreferences: {
                 plugins: true,
                 sandbox: false,
