@@ -136,7 +136,7 @@ function handleKeyUp(webContents, code) {
 async function handleText(webContents, text) {
     for (const ch of text) {
         webContents.sendInputEvent({ type: 'char', keyCode: ch });
-        await new Promise(r => setTimeout(r, 5)); // small delay
+        await new Promise(r => setTimeout(r, 10)); // small delay
     }
 }
 
