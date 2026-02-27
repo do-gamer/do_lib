@@ -130,11 +130,14 @@ function handleKeyUp(webContents, code) {
     dispatchKeyEvent(webContents, code, false, true);
 }
 
-async function typeText(webContents, text) {
+/**
+ * Simulates typing a string of text by sending individual character events with a small delay between them.
+ */
+async function handleText(webContents, text) {
     for (const ch of text) {
         webContents.sendInputEvent({ type: 'char', keyCode: ch });
         await new Promise(r => setTimeout(r, 5)); // small delay
     }
 }
 
-module.exports = { handleKeyClick, handleKeyDown, handleKeyUp, typeText };
+module.exports = { handleKeyClick, handleKeyDown, handleKeyUp, handleText };

@@ -1047,7 +1047,7 @@ void BotClient::KeyUp(uint32_t key)
 
 void BotClient::SendText(const std::string &text)
 {
-    SendBrowserCommand("text|" + text, 1);
+    SendBrowserCommand(utils::format("text|{}", text), 1);
 }
 
 void BotClient::MouseClick(int32_t x, int32_t y)
