@@ -8,14 +8,50 @@ cd ${RUN_PATH}
 
 BUILD_DIR="./build"
 
-# Clean build directory if --clean or -c flag is provided
-if [[ "${1:-}" == "--clean" || "${1:-}" == "-c" ]]; then
+# Command line flags
+CLEAN=false
+BUILD_BROWSER=false
+
+# parse arguments (allows -c and -b in any order)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -c)
+            CLEAN=true
+            shift
+            ;;
+        -b)
+            BUILD_BROWSER=true
+            shift
+            ;;
+        *)
+            echo "Usage: $0 [-c] [-b]"
+            echo "  -c: Clean build directory (and browser/dist) before building"
+            echo "  -b: Build browser component first by invoking browser/build.sh"
+            exit 1
+            ;;
+    esac
+done
+
+# perform clean if requested
+if [[ "$CLEAN" == "true" ]]; then
     echo "Cleaning build directory..."
     rm -rf "$BUILD_DIR"
-elif [[ -n "${1:-}" ]]; then
-    echo "Usage: $0 [--clean|-c]"
-    echo "  --clean, -c: Clean build directory before building"
-    exit 1
+    # also clean browser output if present
+    if [[ -d "browser/dist" ]]; then
+        echo "Cleaning browser/dist..."
+        rm -rf "browser/dist"
+    fi
+fi
+
+# If requested, build the browser component first
+if [[ "$BUILD_BROWSER" == "true" ]]; then
+    echo "Building browser component..."
+    if [[ -x "browser/build.sh" ]]; then
+        ./browser/build.sh
+    else
+        echo "Browser build script not found or not executable" >&2
+        exit 1
+    fi
 fi
 
 cmake -S . -B "$BUILD_DIR" \
@@ -32,10 +68,18 @@ if [[ -f "$CLIENT_LIB_DIR/libDarkTanos.so" ]]; then
 	mv "$CLIENT_LIB_DIR/libDarkTanos.so" "$CLIENT_LIB_DIR/DarkTanos.so"
 fi
 
-if ! command -v strip >/dev/null 2>&1; then
-	echo "strip not found; skipping symbol stripping." >&2
-	exit 0
+if command -v strip >/dev/null 2>&1; then
+    strip --strip-unneeded "$CLIENT_LIB_DIR/DarkTanos.so"
+    strip --strip-unneeded "$DO_LIB_DIR/libdo_lib.so"
+else
+    echo "strip not found; skipping symbol stripping." >&2
 fi
 
-strip --strip-unneeded "$CLIENT_LIB_DIR/DarkTanos.so"
-strip --strip-unneeded "$DO_LIB_DIR/libdo_lib.so"
+# if a copy script exists, execute it to move artifacts into darkbot/lib
+if [[ -x "./copy.sh" ]]; then
+    echo "Running copy.sh to transfer build artifacts..."
+    ./copy.sh
+elif [[ -f "./copy.sh" ]]; then
+    echo "copy.sh exists but is not executable; please make it executable to run"
+fi
+
