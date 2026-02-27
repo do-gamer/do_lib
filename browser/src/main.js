@@ -15,15 +15,17 @@ var server = net.createServer(function (sock) {
     sock.on('data', async (data) => {
         let args = data.split("|");
 
-        if (args.length == 0 || !mainWindow)
-        {
+        if (args.length == 0 || !mainWindow) {
             return;
         }
 
         if (args[0] == "refresh") {
-           mainWindow.reload();
+            mainWindow.reload();
         } else if (args.length == 2) {
-            mainWindow.focus();
+            // Ensure the main window is focused
+            if (!mainWindow.isFocused()) {
+                mainWindow.focus();
+            }
             switch (args[0]) {
                 case "keyClick":
                     handleKeyClick(mainWindow.webContents, args[1]);

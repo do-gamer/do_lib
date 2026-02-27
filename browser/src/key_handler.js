@@ -99,7 +99,9 @@ function resolveKey(code) {
  * Dispatches key events based on the provided code and action (press/release).
  */
 function dispatchKeyEvent(webContents, code, press, release) {
-    webContents.focus();
+    if (!webContents.isFocused()) {
+        webContents.focus();
+    }
 
     const keyCode = resolveKey(code);
 
@@ -136,7 +138,9 @@ function handleKeyUp(webContents, code) {
  * Simulates typing a string of text by sending individual character events with a small delay between them.
  */
 async function handleText(webContents, text) {
-    webContents.focus();
+    if (!webContents.isFocused()) {
+        webContents.focus();
+    }
 
     for (const ch of text) {
         webContents.sendInputEvent({ type: 'char', keyCode: ch });
