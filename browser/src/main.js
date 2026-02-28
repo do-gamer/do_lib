@@ -101,10 +101,6 @@ function createWindow(url, sid, launchGame = false) {
         if (!focus() || input.type != "keyUp") {
             return;
         }
-
-        if (input.control && input.code === "KeyN") {
-            createWindow(url, sid);
-        }
     });
 
     console.log(url, sid, launchGame);
