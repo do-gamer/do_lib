@@ -6,7 +6,10 @@ RUN_PATH=`dirname "${SCRIPTSRC}" || echo .`
 
 cd ${RUN_PATH}
 
+BROWSER_DIR="./browser"
 BUILD_DIR="./build"
+CLIENT_LIB_DIR="$BUILD_DIR/client"
+DO_LIB_DIR="$BUILD_DIR/do_lib"
 
 # Command line flags
 CLEAN=false
@@ -32,28 +35,47 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# perform clean if requested
+# Perform clean if requested
 if [[ "$CLEAN" == "true" ]]; then
-    echo "Cleaning build directory..."
+    echo "Cleaning $BUILD_DIR directory..."
     rm -rf "$BUILD_DIR"
     # also clean browser output if present
-    if [[ -d "browser/dist" ]]; then
-        echo "Cleaning browser/dist..."
-        rm -rf "browser/dist"
+    if [[ -d "$BROWSER_DIR/dist" ]]; then
+        echo "Cleaning $BROWSER_DIR/dist directory..."
+        rm -rf "$BROWSER_DIR/dist"
     fi
 fi
 
 # If requested, build the browser component first
 if [[ "$BUILD_BROWSER" == "true" ]]; then
+    cd ${BROWSER_DIR}
     echo "Building browser component..."
-    if [[ -x "browser/build.sh" ]]; then
-        ./browser/build.sh
+
+    # Load nvm (required)
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    # This loads nvm (if installed via standard install script)
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        # shellcheck disable=SC1090
+        . "$NVM_DIR/nvm.sh"
     else
-        echo "Browser build script not found or not executable" >&2
-        exit 1
+        echo "❌ nvm not found. Please install NVM first: https://github.com/nvm-sh/nvm"
+        return 1 2>/dev/null || exit 1
     fi
+
+    # Use or install Node.js version from .nvmrc
+    nvm use || nvm install
+
+    echo "Installing dependencies."
+    npm install
+
+    echo "Building browser app."
+    npm run dist -- --linux
+
+    echo "Browser build completed."
+    cd ${RUN_PATH}
 fi
 
+# Configure and build the main project with optimizations
 cmake -S . -B "$BUILD_DIR" \
 	-DCMAKE_BUILD_TYPE=Release \
 	-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
@@ -61,13 +83,12 @@ cmake -S . -B "$BUILD_DIR" \
 	-DCMAKE_SHARED_LINKER_FLAGS_RELEASE="-Wl,--gc-sections"
 cmake --build "$BUILD_DIR"
 
-CLIENT_LIB_DIR="$BUILD_DIR/client"
-DO_LIB_DIR="$BUILD_DIR/do_lib"
-
+# Rename the client library to match what darkbot expects
 if [[ -f "$CLIENT_LIB_DIR/libDarkTanos.so" ]]; then
 	mv "$CLIENT_LIB_DIR/libDarkTanos.so" "$CLIENT_LIB_DIR/DarkTanos.so"
 fi
 
+# Strip unneeded symbols from the shared libraries to reduce size
 if command -v strip >/dev/null 2>&1; then
     strip --strip-unneeded "$CLIENT_LIB_DIR/DarkTanos.so"
     strip --strip-unneeded "$DO_LIB_DIR/libdo_lib.so"

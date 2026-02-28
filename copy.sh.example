@@ -16,12 +16,12 @@ DEST="../darkbot/lib"
 # -----------------------------------------------------------------------------
 
 # Source directories for the files to copy
-BROWSER_ARR_DIR="./browser/dist"
+BROWSER_APP_DIR="./browser/dist"
 CLIENT_LIB_DIR="./build/client"
 DO_LIB_DIR="./build/do_lib"
 
 for src in \
-    "$BROWSER_ARR_DIR/darkbot_browser_linux.AppImage" \
+    "$BROWSER_APP_DIR/darkbot_browser_linux.AppImage" \
     "$CLIENT_LIB_DIR/DarkTanos.so" \
     "$DO_LIB_DIR/libdo_lib.so"; do
     if [[ -f "$src" ]]; then
