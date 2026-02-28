@@ -31,7 +31,6 @@
 
 namespace window
 {
-    constexpr const char *process_name = "darkbot_browser";
     Window browser = 0;
 
     struct Property
@@ -854,7 +853,7 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
 bool BotClient::find_flash_process()
 {
-    auto procs = ProcUtil::FindProcsByName(window::process_name);
+    auto procs = ProcUtil::FindProcsByName("darkbot_browser");
     int best_pid = -1;
     uint64_t best_memory = 0;
 
