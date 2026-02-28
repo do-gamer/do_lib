@@ -75,10 +75,12 @@ function createWindow(url, sid, launchGame = false) {
         splashScreenOpts: {
             width: 300,
             height: 300,
-            transparent: true,
+            frame: true,
             alwaysOnTop: true,
             webPreferences: {
-                contextIsolation: true
+                contextIsolation: true,
+                nodeIntegration: false,
+                enableRemoteModule: false
             }
         },
         minVisible: 0,
