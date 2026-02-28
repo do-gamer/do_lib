@@ -860,6 +860,7 @@ bool BotClient::find_flash_process()
     for (int proc_pid : procs)
     {
         if (ProcUtil::CmdlineContains(proc_pid, "no-sandbox") &&
+            ProcUtil::CmdlineContains(proc_pid, "ppapi") &&
             ProcUtil::IsChildOf(proc_pid, m_browser_pid) &&
             ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
