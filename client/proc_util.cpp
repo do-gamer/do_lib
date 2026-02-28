@@ -64,6 +64,30 @@ std::vector<int> ProcUtil::FindProcsByName(const std::string &pattern)
     return result;
 }
 
+bool ProcUtil::CmdlineContains(pid_t pid, const std::string &pattern)
+{
+    if (pid <= 0 || pattern.empty())
+    {
+        return false;
+    }
+
+    auto cmd_path = std::filesystem::path("/proc") / std::to_string(pid) / "cmdline";
+    std::ifstream cmdline_f { cmd_path.string(), std::ios::binary };
+    if (!cmdline_f)
+    {
+        return false;
+    }
+
+    std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
+    if (contents.empty())
+    {
+        return false;
+    }
+
+    std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
+    return contents.find(pattern) != std::string::npos;
+}
+
 bool ProcUtil::ProcessExists(pid_t pid)
 {
     return std::filesystem::exists("/proc/"+std::to_string(pid));

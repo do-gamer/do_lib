@@ -125,6 +125,9 @@ private:
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
 
+    std::string normalized_sid() const;
+    bool is_valid_browser_process(int pid, const char *source = nullptr) const;
+
     bool find_flash_process();
     void reset();
 };

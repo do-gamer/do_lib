@@ -31,6 +31,7 @@
 
 namespace window
 {
+    constexpr const char *process_name = "darkbot_browser";
     Window browser = 0;
 
     struct Property
@@ -793,17 +794,18 @@ void BotClient::LaunchBrowser()
                 sid.replace(0, 6, "");
             }
 
-                execle(
-                    fpath,
-                    fpath,
-                    "--sid", sid.c_str(),
-                    "--url", url.c_str(),
-                    "--launch",
-                    "--ozone-platform=x11",
-                    "--disable-background-timer-throttling",
-                    "--disable-renderer-backgrounding",
-                    NULL,
-                    envp.data());
+            execle(
+                fpath,
+                fpath,
+                "--sid", sid.c_str(),
+                "--url", url.c_str(),
+                "--launch",
+                "--ozone-platform=x11",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                NULL,
+                envp.data());
+
             break;
         }
         default:
@@ -852,15 +854,33 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
 bool BotClient::find_flash_process()
 {
-    auto procs = ProcUtil::FindProcsByName("no-sandbox");
+    auto procs = ProcUtil::FindProcsByName(window::process_name);
+    int best_pid = -1;
+    uint64_t best_memory = 0;
+
     for (int proc_pid : procs)
     {
-        if (ProcUtil::IsChildOf(proc_pid, m_browser_pid) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        if (ProcUtil::CmdlineContains(proc_pid, "no-sandbox") &&
+            ProcUtil::IsChildOf(proc_pid, m_browser_pid) &&
+            ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
-            m_flash_pid = proc_pid;
-            return true;
+            // Search for the flash process with the most memory usage,
+            // since the browser can spawn multiple and we want to target the main one
+            uint64_t memory = ProcUtil::GetMemoryUsage(proc_pid);
+            if (memory >= best_memory)
+            {
+                best_memory = memory;
+                best_pid = proc_pid;
+            }
         }
     }
+
+    if (best_pid > 0)
+    {
+        m_flash_pid = best_pid;
+        return true;
+    }
+
     return false;
 }
 
@@ -884,6 +904,7 @@ bool BotClient::IsValid()
     {
         fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
+        m_flash_pid = -1;
         return false;
     }
 
@@ -895,7 +916,29 @@ bool BotClient::IsValid()
 
     if (!ProcUtil::ProcessExists(m_flash_pid))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", m_flash_pid, m_browser_pid);
+        int missing_pid = m_flash_pid;
+        m_flash_pid = -1;
+
+        if (find_flash_process())
+        {
+            if (m_shared_mem_flash)
+            {
+                shmdt(m_shared_mem_flash);
+                m_shared_mem_flash = nullptr;
+            }
+
+            if (m_flash_sem >= 0)
+            {
+                semctl(m_flash_sem, 0, IPC_RMID, 1);
+                m_flash_sem = -1;
+            }
+
+            utils::log("[IsValid] Flash process switched from {} to {}\n", missing_pid, m_flash_pid);
+            m_flash_shmid = -1;
+            return true;
+        }
+
+        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", missing_pid, m_browser_pid);
         SendBrowserCommand("refresh", 1);
         reset();
         return false;
