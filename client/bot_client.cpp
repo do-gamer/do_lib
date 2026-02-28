@@ -2,6 +2,13 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
+#include <mutex>
+#include <thread>
+#include <chrono>
+#include <unistd.h>
+#include <vector>
+#include <sstream>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -16,15 +23,71 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/X.h>
+#include <X11/extensions/shape.h>
 
 
 #define MEM_SIZE 1024
 
-namespace
+namespace window
 {
-    Window browser_window = 0;
+    constexpr const char *process_name = "darkbot_browser";
+    Window browser = 0;
 
-    bool get_window_pid(Display *display, Window window, pid_t &pid)
+    struct Property
+    {
+        Atom actual_type = None;
+        int actual_format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *prop = nullptr;
+    };
+
+    /**
+     * Helper function to free the memory allocated by XGetWindowProperty and reset the WindowProperty structure.
+     */
+    void free_property(Property &property)
+    {
+        if (property.prop)
+        {
+            XFree(property.prop);
+        }
+        property.actual_type = None;
+        property.actual_format = 0;
+        property.nitems = 0;
+        property.bytes_after = 0;
+        property.prop = nullptr;
+    }
+
+    /**
+     * Helper function to get a window property with proper error handling and type checking.
+     */
+    bool get_property(Display *display,
+                      Window window,
+                      Atom property,
+                      Atom type,
+                      long length,
+                      Property &out)
+    {
+        if (!display || property == None)
+        {
+            return false;
+        }
+
+        int status = XGetWindowProperty(display, window, property, 0, length, False, type,
+                                        &out.actual_type,
+                                        &out.actual_format,
+                                        &out.nitems,
+                                        &out.bytes_after,
+                                        &out.prop);
+
+        return status == Success;
+    }
+
+    /**
+     * Helper function to get the PID of the process owning a window, using the _NET_WM_PID property.
+     */
+    bool get_pid(Display *display, Window window, pid_t &pid)
     {
         Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
         if (atom_pid == None)
@@ -32,52 +95,41 @@ namespace
             return false;
         }
 
-        Atom actual_type = None;
-        int actual_format = 0;
-        unsigned long nitems = 0;
-        unsigned long bytes_after = 0;
-        unsigned char *prop = nullptr;
+        Property property;
+        bool read_ok = get_property(display, window, atom_pid, XA_CARDINAL, 1, property);
 
-        int status = XGetWindowProperty(
-                display,
-                window,
-                atom_pid,
-                0,
-                1,
-                False,
-                XA_CARDINAL,
-                &actual_type,
-                &actual_format,
-                &nitems,
-                &bytes_after,
-                &prop);
-
-        if (status != Success || !prop || nitems == 0)
+        if (!read_ok || !property.prop || property.nitems == 0)
         {
-            if (prop)
-            {
-                XFree(prop);
-            }
+            free_property(property);
             return false;
         }
 
-        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop));
-        XFree(prop);
+        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(property.prop));
+        free_property(property);
         return true;
     }
 
-    bool is_browser_window_pid(pid_t owner_pid, pid_t browser_pid)
+    /**
+     * Helper function to check if a given PID is the browser process or a child of it.
+     */
+    bool is_browser_pid(pid_t owner_pid, pid_t browser_pid)
     {
         return owner_pid == browser_pid || ProcUtil::IsChildOf(owner_pid, browser_pid);
     }
 
-    bool x11_window_control_available()
+    /**
+     * Checks if X11 window control is available by verifying the DISPLAY environment variable.
+     */
+    bool x11_control_available()
     {
         const char *display = std::getenv("DISPLAY");
         return display && *display;
     }
 
-    bool try_get_window_attrs(Display *display, Window window)
+    /**
+     * Helper function to attempt to get window attributes, handling potential X11 errors gracefully.
+     */
+    bool try_get_attrs(Display *display, Window window)
     {
         XWindowAttributes attrs;
         if (XGetWindowAttributes(display, window, &attrs) != 0)
@@ -89,6 +141,10 @@ namespace
         return XGetWindowAttributes(display, window, &attrs) != 0;
     }
 
+    /**
+     * Helper function to find the top-level root child of a given window,
+     * which is likely the actual browser window we want to control.
+     */
     Window find_toplevel_root_child(Display *display, Window root, Window window)
     {
         if (!window)
@@ -125,6 +181,10 @@ namespace
         return window;
     }
 
+    /**
+     * Recursive helper function to find any descendant window owned by the browser process,
+     * in case the top-level window doesn't have a PID or isn't directly owned by the browser.
+     */
     Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid)
     {
         if (!root)
@@ -133,7 +193,7 @@ namespace
         }
 
         pid_t owner_pid = -1;
-        if (get_window_pid(display, root, owner_pid) && is_browser_window_pid(owner_pid, browser_pid))
+        if (get_pid(display, root, owner_pid) && is_browser_pid(owner_pid, browser_pid))
         {
             return root;
         }
@@ -161,47 +221,33 @@ namespace
         return found;
     }
 
-    Window find_browser_client_window(Display *display, pid_t browser_pid)
+    /**
+     * Main function to find the browser window by first checking the _NET_CLIENT_LIST for windows owned by the browser PID.
+     */
+    Window find_browser_client(Display *display, pid_t browser_pid)
     {
         Window root = DefaultRootWindow(display);
         Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
         if (atom_client_list != None)
         {
-            Atom actual_type = None;
-            int actual_format = 0;
-            unsigned long nitems = 0;
-            unsigned long bytes_after = 0;
-            unsigned char *prop = nullptr;
+            Property property;
+            bool read_ok = get_property(display, root, atom_client_list, XA_WINDOW, 4096, property);
 
-            int status = XGetWindowProperty(
-                    display,
-                    root,
-                    atom_client_list,
-                    0,
-                    4096,
-                    False,
-                    XA_WINDOW,
-                    &actual_type,
-                    &actual_format,
-                    &nitems,
-                    &bytes_after,
-                    &prop);
-
-            if (status == Success && prop && actual_type == XA_WINDOW)
+            if (read_ok && property.prop && property.actual_type == XA_WINDOW)
             {
-                Window *windows = reinterpret_cast<Window *>(prop);
+                Window *windows = reinterpret_cast<Window *>(property.prop);
                 Window child_fallback = 0;
-                for (unsigned long i = 0; i < nitems; i++)
+                for (unsigned long i = 0; i < property.nitems; i++)
                 {
                     pid_t owner_pid = -1;
-                    if (!get_window_pid(display, windows[i], owner_pid))
+                    if (!get_pid(display, windows[i], owner_pid))
                     {
                         continue;
                     }
 
                     if (owner_pid == browser_pid)
                     {
-                        XFree(prop);
+                        free_property(property);
                         return windows[i];
                     }
 
@@ -211,16 +257,14 @@ namespace
                     }
                 }
 
-                XFree(prop);
                 if (child_fallback)
                 {
+                    free_property(property);
                     return child_fallback;
                 }
             }
-            else if (prop)
-            {
-                XFree(prop);
-            }
+
+            free_property(property);
         }
 
         Window any_owned = find_browser_owned_descendant_recursive(display, root, browser_pid);
@@ -232,30 +276,368 @@ namespace
         return find_toplevel_root_child(display, root, any_owned);
     }
 
-    void toggle_browser_visibility(pid_t browser_pid, bool visible)
+    /**
+     * Helper function to check if a window has the WM_STATE property, which is a strong indicator
+     * that it's a top-level application window rather than a transient or child window.
+     */
+    bool has_wm_state(Display *display, Window window)
     {
+        Atom wm_state = XInternAtom(display, "WM_STATE", True);
+        if (wm_state == None)
+        {
+            return false;
+        }
+
+        Property property;
+        bool read_ok = get_property(display, window, wm_state, wm_state, 2, property);
+        bool has_state = read_ok && property.actual_type == wm_state && property.nitems > 0;
+
+        free_property(property);
+        return has_state;
+    }
+
+    /**
+     * Main function to resolve the actual client window of the browser,
+     * which may involve checking the top-level window and its children
+     */
+    Window resolve_client(Display *display, pid_t browser_pid)
+    {
+        if (!display)
+        {
+            return 0;
+        }
+
+        Window window = find_browser_client(display, browser_pid);
+        if (!window)
+        {
+            return 0;
+        }
+
+        if (has_wm_state(display, window))
+        {
+            return window;
+        }
+
+        Window root_return = 0;
+        Window parent_return = 0;
+        Window *children = nullptr;
+        unsigned int nchildren = 0;
+
+        if (!XQueryTree(display, window, &root_return, &parent_return, &children, &nchildren))
+        {
+            return window;
+        }
+
+        Window client = 0;
+        for (unsigned int i = 0; i < nchildren; i++)
+        {
+            if (has_wm_state(display, children[i]))
+            {
+                client = children[i];
+                break;
+            }
+        }
+
+        if (children)
+        {
+            XFree(children);
+        }
+
+        return client ? client : window;
+    }
+
+    /**
+     * Helper function to execute an action in the context of the browser window.
+     */
+    template<typename Func>
+    void with_browser(int flash_pid, int browser_pid, Func&& action)
+    {
+        if (flash_pid == -1 || !x11_control_available())
+        {
+            return;
+        }
+
         Display *display = XOpenDisplay(nullptr);
         if (!display)
         {
-            return; // Failed to open display
-        }
-        
-        if (!browser_window || !try_get_window_attrs(display, browser_window))
-        {
-            browser_window = find_browser_client_window(display, browser_pid);
+            return;
         }
 
-        if (!browser_window)
+        if (!browser || !try_get_attrs(display, browser))
         {
-            XCloseDisplay(display);
-            return; // Failed to find browser window
+            browser = resolve_client(display, browser_pid);
         }
 
-        // Show or hide the browser window
-        visible ? XMapWindow(display, browser_window) : XUnmapWindow(display, browser_window);
+        if (browser)
+        {
+            action(display, browser);
+        }
 
         XFlush(display);
         XCloseDisplay(display);
+    }
+}
+
+namespace mouse
+{
+    struct EventContext
+    {
+        Display *display;
+        Window window;
+        Window root;
+        int local_x, local_y;
+        int root_x, root_y;
+    };
+
+    /**
+     * Prepares the context for a mouse event by translating local coordinates to root coordinates.
+     */
+    bool prepare_event(Display *display, Window window, int32_t x, int32_t y, EventContext &ctx)
+    {
+        if (!display || !window)
+        {
+            return false;
+        }
+
+        XWindowAttributes attrs;
+        if (XGetWindowAttributes(display, window, &attrs) == 0)
+        {
+            return false;
+        }
+
+        ctx.display = display;
+        ctx.window = window;
+        ctx.local_x = x;
+        ctx.local_y = y;
+
+        // Clamp coordinates to the window bounds to avoid unexpected behavior
+        if (ctx.local_x < 0)
+            ctx.local_x = 0;
+        if (ctx.local_y < 0)
+            ctx.local_y = 0;
+        if (attrs.width > 0 && ctx.local_x >= attrs.width)
+            ctx.local_x = attrs.width - 1;
+        if (attrs.height > 0 && ctx.local_y >= attrs.height)
+            ctx.local_y = attrs.height - 1;
+
+        ctx.root = DefaultRootWindow(display);
+        Window child = 0;
+        XTranslateCoordinates(display, window, ctx.root, 0, 0, &ctx.root_x, &ctx.root_y, &child);
+
+        return true;
+    }
+
+    /**
+     * Fills the common fields of an XEvent structure for mouse events, based on the provided context.
+     */
+    void fill_event_common(XEvent &event, const EventContext &ctx)
+    {
+        std::memset(&event, 0, sizeof(event));
+        event.xany.display = ctx.display;
+        event.xany.window = ctx.window;
+        event.xbutton.root = ctx.root;
+        event.xbutton.subwindow = None;
+        event.xbutton.time = CurrentTime;
+        event.xbutton.x = ctx.local_x;
+        event.xbutton.y = ctx.local_y;
+        event.xbutton.x_root = ctx.root_x + ctx.local_x;
+        event.xbutton.y_root = ctx.root_y + ctx.local_y;
+        event.xbutton.send_event = True;
+        event.xbutton.same_screen = True;
+    }
+
+    /**
+     * Sends a mouse move event.
+     */
+    void send_move(Display *display, Window window, int32_t x, int32_t y)
+    {
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
+            return;
+
+        XEvent event;
+        fill_event_common(event, ctx);
+        event.type = MotionNotify;
+
+        XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
+    }
+
+    /**
+     * Sends mouse button press/release events.
+     */
+    void send_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    {
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
+            return;
+
+        XEvent event;
+        fill_event_common(event, ctx);
+        event.xbutton.button = button;
+
+        if (press)
+        {
+            event.type = ButtonPress;
+            XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event);
+        }
+
+        if (release)
+        {
+            event.type = ButtonRelease;
+            XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event);
+        }
+    }
+
+    /**
+     * Sends a mouse wheel event.
+     */
+    void send_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
+    {
+        send_button(display, window, x, y, button, true, true);
+    }
+}
+
+namespace cursor_marker
+{
+    static constexpr int dot_size = 6; // 6x6 marker size
+    static constexpr const char *dot_color = "red";
+
+    // State for the cursor marker, including whether it's enabled.
+    struct State
+    {
+        bool enabled = false;
+        Display *display = nullptr;
+        Window window = 0;
+        std::chrono::steady_clock::time_point last_time;
+        std::mutex mutex;
+    };
+
+    static State state;
+
+    /**
+     * Creates a small red window that will serve as a marker for the virtual cursor position.
+     * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
+     */
+    void create()
+    {
+        state.display = XOpenDisplay(NULL);
+        if (!state.display)
+            return;
+
+        int scr = DefaultScreen(state.display);
+        Window root = RootWindow(state.display, scr);
+
+        Colormap cmap = DefaultColormap(state.display, scr);
+        XColor color;
+        XColor exact;
+        if (!XAllocNamedColor(state.display, cmap, dot_color, &color, &exact))
+        {
+            color.pixel = 0; // fallback black
+        }
+
+        XSetWindowAttributes attr;
+        attr.override_redirect = True;
+        attr.background_pixel = color.pixel;
+        attr.background_pixmap = None;
+
+        unsigned long mask = CWOverrideRedirect | CWBackPixel;
+        state.window = XCreateWindow(
+            state.display,
+            root,
+            0, 0, dot_size, dot_size, 0,
+            CopyFromParent,
+            InputOutput,
+            CopyFromParent,
+            mask,
+            &attr);
+
+        // make the window input‑transparent so it doesn't grab events
+        int shape_event, shape_error;
+        if (XShapeQueryExtension(state.display, &shape_event, &shape_error))
+        {
+            XRectangle rect = {0, 0, 0, 0};
+            XShapeCombineRectangles(state.display,
+                                    state.window,
+                                    ShapeInput,
+                                    0, 0,
+                                    &rect,
+                                    1,
+                                    ShapeSet,
+                                    Unsorted);
+        }
+
+        XMapRaised(state.display, state.window);
+        XFlush(state.display);
+    }
+
+    /**
+     * Destroys the cursor marker window and closes the display connection.
+     */
+    void destroy()
+    {
+        if (state.window && state.display)
+        {
+            XDestroyWindow(state.display, state.window);
+            XCloseDisplay(state.display);
+        }
+        state.window = 0;
+        state.display = nullptr;
+    }
+
+    /**
+     * Checks if the cursor marker should be hidden due to inactivity (no updates for 3 seconds) and hides it if necessary.
+     */
+    void maybe_clear()
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.enabled)
+            return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - state.last_time >= std::chrono::seconds(3))
+        {
+            destroy();
+        }
+    }
+
+    /**
+     * Updates the position of the cursor marker to the given coordinates.
+     */
+    void update(int x, int y, int flash_pid, int browser_pid)
+    {
+        if (!state.enabled || flash_pid == -1 || !window::x11_control_available())
+            return;
+
+        // record last update time
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.last_time = std::chrono::steady_clock::now();
+        }
+
+        if (!state.window)
+            create();
+
+        if (state.window && state.display)
+        {
+            // translate coordinates from browser window space to root (screen) space
+            window::with_browser(flash_pid, browser_pid, [&](Display *display, Window window) {
+                Window root = DefaultRootWindow(display);
+                int root_x = 0, root_y = 0;
+                Window child = 0;
+                XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
+
+                // move marker on its own display (should be same as 'display' but we stored earlier when created)
+                const int offset = static_cast<int>(std::lround(dot_size / 2.0));
+                XMoveWindow(state.display, state.window, root_x - offset, root_y - offset);
+                XFlush(state.display);
+            });
+        }
+
+        // schedule a hide check in 3 seconds
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            maybe_clear();
+        }).detach();
     }
 }
 
@@ -268,8 +650,6 @@ enum class MessageType
     REFINE,
     UPGRADE,
     USE_ITEM,
-    KEY_CLICK,
-    MOUSE_CLICK,
     CHECK_SIGNATURE,
 
     NONE
@@ -320,20 +700,6 @@ struct UseItemMessage
 
 };
 
-struct KeyClickMessage
-{
-    MessageType type = MessageType::KEY_CLICK;
-    uint32_t key;
-};
-
-struct MouseClickMessage
-{
-    MessageType type = MessageType::MOUSE_CLICK;
-    uint32_t button;
-    int32_t x;
-    int32_t y;
-};
-
 struct GetSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -354,8 +720,6 @@ union Message
     SendNotificationMessage notify;
     RefineMessage refine;
     UseItemMessage item;
-    KeyClickMessage key;
-    MouseClickMessage click;
     GetSignatureMessage sig;
 };
 
@@ -367,12 +731,9 @@ BotClient::BotClient() :
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    if (m_flash_pid == -1 || !x11_window_control_available())
-    {
-        return;
-    }
-
-    toggle_browser_visibility(m_browser_pid, visible);
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
+    });
 }
 
 BotClient::~BotClient()
@@ -391,6 +752,14 @@ void sigchld_handler(int signal)
 
 void BotClient::LaunchBrowser()
 {
+    const char *fpath = "lib/darkbot_browser_linux.AppImage";
+    /* ensure the browser binary exists before attempting to fork/exec */
+    if (access(fpath, F_OK) != 0)
+    {
+        fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
+        return;
+    }
+
     int pid = fork();
 
     switch (pid)
@@ -402,8 +771,6 @@ void BotClient::LaunchBrowser()
         }
         case 0:
         {
-            const char *fpath = "lib/backpage-linux-x86_64.AppImage";
-
             std::vector<const char *> envp
             {
                 "LD_PRELOAD=lib/libdo_lib.so",
@@ -427,17 +794,18 @@ void BotClient::LaunchBrowser()
                 sid.replace(0, 6, "");
             }
 
-                execle(
-                    fpath,
-                    fpath,
-                    "--sid", sid.c_str(),
-                    "--url", url.c_str(),
-                    "--launch",
-                    "--ozone-platform=x11",
-                    "--disable-background-timer-throttling",
-                    "--disable-renderer-backgrounding",
-                    NULL,
-                    envp.data());
+            execle(
+                fpath,
+                fpath,
+                "--sid", sid.c_str(),
+                "--url", url.c_str(),
+                "--launch",
+                "--ozone-platform=x11",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                NULL,
+                envp.data());
+
             break;
         }
         default:
@@ -486,15 +854,33 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
 bool BotClient::find_flash_process()
 {
-    auto procs = ProcUtil::FindProcsByName("no-sandbox");
+    auto procs = ProcUtil::FindProcsByName(window::process_name);
+    int best_pid = -1;
+    uint64_t best_memory = 0;
+
     for (int proc_pid : procs)
     {
-        if (ProcUtil::IsChildOf(proc_pid, m_browser_pid) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        if (ProcUtil::CmdlineContains(proc_pid, "no-sandbox") &&
+            ProcUtil::IsChildOf(proc_pid, m_browser_pid) &&
+            ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
-            m_flash_pid = proc_pid;
-            return true;
+            // Search for the flash process with the most memory usage,
+            // since the browser can spawn multiple and we want to target the main one
+            uint64_t memory = ProcUtil::GetMemoryUsage(proc_pid);
+            if (memory >= best_memory)
+            {
+                best_memory = memory;
+                best_pid = proc_pid;
+            }
         }
     }
+
+    if (best_pid > 0)
+    {
+        m_flash_pid = best_pid;
+        return true;
+    }
+
     return false;
 }
 
@@ -518,6 +904,7 @@ bool BotClient::IsValid()
     {
         fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
+        m_flash_pid = -1;
         return false;
     }
 
@@ -529,7 +916,29 @@ bool BotClient::IsValid()
 
     if (!ProcUtil::ProcessExists(m_flash_pid))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", m_flash_pid, m_browser_pid);
+        int missing_pid = m_flash_pid;
+        m_flash_pid = -1;
+
+        if (find_flash_process())
+        {
+            if (m_shared_mem_flash)
+            {
+                shmdt(m_shared_mem_flash);
+                m_shared_mem_flash = nullptr;
+            }
+
+            if (m_flash_sem >= 0)
+            {
+                semctl(m_flash_sem, 0, IPC_RMID, 1);
+                m_flash_sem = -1;
+            }
+
+            utils::log("[IsValid] Flash process switched from {} to {}\n", missing_pid, m_flash_pid);
+            m_flash_shmid = -1;
+            return true;
+        }
+
+        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", missing_pid, m_browser_pid);
         SendBrowserCommand("refresh", 1);
         reset();
         return false;
@@ -664,24 +1073,128 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
     return response.result.value;
 }
 
-bool BotClient::ClickKey(uint32_t key)
+void BotClient::KeyClick(uint32_t key)
 {
-    Message message;
-    message.type = MessageType::KEY_CLICK;
-    message.key.key = key;
-    SendFlashCommand(&message);
-    return true;
+    SendBrowserCommand(utils::format("keyClick|{}", key), 1);
 }
 
-bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
+void BotClient::KeyDown(uint32_t key)
 {
-    Message message;
-    message.type = MessageType::MOUSE_CLICK;
-    message.click.x = x;
-    message.click.y = y;
-    message.click.button = button;
-    SendFlashCommand(&message);
-    return true;
+    SendBrowserCommand(utils::format("keyDown|{}", key), 1);
+}
+
+void BotClient::KeyUp(uint32_t key)
+{
+    SendBrowserCommand(utils::format("keyUp|{}", key), 1);
+}
+
+void BotClient::SendText(const std::string &text)
+{
+    SendBrowserCommand(utils::format("text|{}", text), 1);
+}
+
+void BotClient::MouseClick(int32_t x, int32_t y)
+{
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, true, true);
+    });
+    UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseMove(int32_t x, int32_t y)
+{
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_move(display, window, x, y);
+    });
+    UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseDown(int32_t x, int32_t y)
+{
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, true, false);
+    });
+    UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseUp(int32_t x, int32_t y)
+{
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_button(display, window, x, y, Button1, false, true);
+    });
+    UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
+{
+    int button = delta >= 0 ? Button4 : Button5;
+    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+        mouse::send_wheel(display, window, x, y, button);
+    });
+    UpdateCursorMarker(x, y);
+}
+
+// process a batch of encoded native actions.
+void BotClient::PostActions(const std::vector<uint64_t> &actions)
+{
+    std::lock_guard<std::mutex> lock(m_post_actions_mutex);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+
+    for (uint64_t value : actions)
+    {
+        if (std::chrono::steady_clock::now() >= deadline)
+            break;
+
+        uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
+        int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
+        int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
+        int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
+
+        int32_t x = static_cast<int32_t>(lparam_low);
+        int32_t y = static_cast<int32_t>(lparam_high);
+        uint32_t key = static_cast<uint32_t>(wparam);
+
+        // Handle native mouse and keyboard events based on the message type.
+        // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
+
+        switch (message)
+        {
+            case 0x1FF: // Mouse CLICK
+                MouseClick(x, y);
+                break;
+            case 0x200: // Mouse MOVE
+                MouseMove(x, y);
+                break;
+            case 0x201: // Mouse DOWN
+                MouseDown(x, y);
+                break;
+            case 0x202: // Mouse UP
+                MouseUp(x, y);
+                break;
+            case 0x20A: // Mouse WHEEL
+                MouseScroll(x, y, wparam);
+                break;
+            case 0x1FE: // Key CLICK
+                KeyClick(key);
+                break;
+            case 0x100: // Key DOWN
+                KeyDown(key);
+                break;
+            case 0x101: // Key UP
+                KeyUp(key);
+                break;
+            case 0x102: // Key CHAR
+                {
+                    std::string text(1, static_cast<char>(wparam));
+                    SendText(text);
+                }
+                break;
+            default:
+                // unsupported message, ignore
+                break;
+        }
+    }
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
@@ -699,4 +1212,22 @@ int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check
     SendFlashCommand(&message, &response);
 
     return response.sig.result;
+}
+
+void BotClient::EnableCursorMarker(bool enable)
+{
+    if (enable == cursor_marker::state.enabled)
+        return;
+
+    cursor_marker::state.enabled = enable;
+    if (!enable)
+    {
+        std::lock_guard<std::mutex> lock(cursor_marker::state.mutex);
+        cursor_marker::destroy();
+    }
+}
+
+void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
+{
+    cursor_marker::update(x, y, m_flash_pid, m_browser_pid);
 }

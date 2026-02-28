@@ -171,20 +171,6 @@ void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t
     m_async_calls.clear();
 }
 
-bool Darkorbit::mouse_click(int x, int y, int button)
-{
-    flash_stuff::mouse_press(x, y, button);
-    flash_stuff::mouse_release(x, y, button);
-    return true;
-}
-
-bool Darkorbit::key_click(uint32_t key)
-{
-    auto *kbmapper = m_event_manager->get_at<avm::ScriptObject *>(0x68);
-    kbmapper->call(3, static_cast<Atom>(key));
-    return true;
-}
-
 bool Darkorbit::lock_entity(uint32_t id)
 {
     utils::log("[*] Trying to lock entity {}\n", id);
@@ -374,8 +360,6 @@ std::string Darkorbit::get_method_signature(avm::MethodInfo *mi, bool method_nam
 
 bool Darkorbit::install(uintptr_t main_app_address)
 {
-    mouse_click(0, 0, 1); // Mouse click to initialize the click param
-
     m_main            = memory::read<avm::ScriptObject *>(main_app_address + 0x540);
     m_screen_manager  = m_main->get_at<avm::ScriptObject *>(0x1f8);
     m_gui_manager     = m_main->get_at<avm::ScriptObject *>(0x200);

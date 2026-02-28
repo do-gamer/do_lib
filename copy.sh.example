@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# THIS IS AN EXAMPLE SCRIPT. Copy this file to "copy.sh", make it
+# executable (chmod +x copy.sh) and adjust DEST to the location of
+# your bot's lib directory on your machine before running the build
+# helper (./build.sh) which invokes it automatically if present.
+
+# Path to bot's lib directory
+DEST="../darkbot/lib"
+
+
+# -----------------------------------------------------------------------------
+# DO NOT CHANGE ANYTHING BELOW THIS LINE UNLESS NECESSARY. The paths
+# below are used by the build helper; altering them may break the copy step.
+# -----------------------------------------------------------------------------
+
+# Source directories for the files to copy
+BROWSER_APP_DIR="./browser/dist"
+CLIENT_LIB_DIR="./build/client"
+DO_LIB_DIR="./build/do_lib"
+
+for src in \
+    "$BROWSER_APP_DIR/darkbot_browser_linux.AppImage" \
+    "$CLIENT_LIB_DIR/DarkTanos.so" \
+    "$DO_LIB_DIR/libdo_lib.so"; do
+    if [[ -f "$src" ]]; then
+        cp -v "$src" "$DEST/$(basename "$src")"
+    else
+        echo "WARNING: source file not found: $src" >&2
+    fi
+done

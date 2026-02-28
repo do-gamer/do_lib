@@ -6,12 +6,6 @@
 #include "darkorbit.h"
 #include "offsets.h"
 
-typedef uintptr_t (*mouse_release_t)(uintptr_t, int, int, int);
-mouse_release_t mouse_release_f = nullptr;
-
-typedef uintptr_t (*mouse_press_t)(uintptr_t, int, int, int);
-mouse_press_t mouse_press_f = nullptr;
-
 typedef uintptr_t (*getproperty_t)(uintptr_t, avm::Multiname *, avm::VTable *);
 getproperty_t getproperty_f = nullptr;
 
@@ -54,42 +48,6 @@ void free_chunk(uintptr_t _this, uintptr_t chunk)
     subhook::ScopedHookRemove hk(free_chunk_hook);
     Darkorbit::get().notify_freechunk(chunk);
     reinterpret_cast<decltype(free_chunk) *>(free_chunk_hook->GetSrc())(_this, chunk);
-}
-
-uintptr_t get_input_param()
-{
-    static uintptr_t input_param = 0;
-    if (!input_param)
-    {
-        uintptr_t input_thing_vtable = memory::get_pages("libpepflashplayer").at(0).start + offsets::input_thing_vt;
-        uintptr_t input_thing = memory::query_memory(reinterpret_cast<uint8_t *>(&input_thing_vtable), sizeof(uintptr_t), 8);
-
-        if (!input_thing)
-        {
-            utils::log("[!] Failed to find input param\n");
-            return 0;
-        }
-        input_param = memory::read<uintptr_t>(input_thing + 0xa8, 0x3e8);
-    }
-    return input_param;
-}
-
-void flash_stuff::mouse_release(int x, int y, int button)
-{
-    uintptr_t param1 = get_input_param();
-    if (param1)
-    {
-        mouse_release_f(param1, x, y, button);
-    }
-}
-
-void flash_stuff::mouse_press(int x, int y, int button)
-{
-    uintptr_t param1 = get_input_param();
-    if (param1)
-    {
-        mouse_press_f(param1, x, y, button);
-    }
 }
 
 bool flash_stuff::hasproperty(avm::ScriptObject *obj, const std::string &prop_name)
@@ -165,8 +123,6 @@ bool flash_stuff::install()
     newarray_f              = reinterpret_cast<newarray_t>(base + offsets::newarray);
     newstring_f             = reinterpret_cast<newstring_t>(base + offsets::newstring);
     finddef_f               = reinterpret_cast<finddef_t>(base + offsets::finddef);
-    mouse_release_f           = reinterpret_cast<mouse_release_t>(base + offsets::mouse_release);
-    mouse_press_f           = reinterpret_cast<mouse_press_t>(base + offsets::mouse_press);
     get_method_signature_f = reinterpret_cast<get_method_signature_t>(base + offsets::get_method_sig);
 
     return true;

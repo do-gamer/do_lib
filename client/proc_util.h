@@ -31,6 +31,8 @@ namespace ProcUtil
 
     std::vector<int> FindProcsByName(const std::string &n);
 
+    bool CmdlineContains(pid_t pid, const std::string &pattern);
+
     bool ProcessExists(pid_t pid);
 
     size_t ReadMemoryBytes(pid_t pid, uintptr_t address, void *dest, uint64_t size);
