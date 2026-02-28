@@ -39,8 +39,8 @@ done
 if [[ "$CLEAN" == "true" ]]; then
     echo "Cleaning $BUILD_DIR directory..."
     rm -rf "$BUILD_DIR"
-    # also clean browser output if present
-    if [[ -d "$BROWSER_DIR/dist" ]]; then
+    # also clean browser output if building browser
+    if [[ "$BUILD_BROWSER" == "true" ]]; then
         echo "Cleaning $BROWSER_DIR/dist directory..."
         rm -rf "$BROWSER_DIR/dist"
     fi
