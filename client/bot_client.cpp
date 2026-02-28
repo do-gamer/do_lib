@@ -853,16 +853,14 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
 bool BotClient::find_flash_process()
 {
-    auto procs = ProcUtil::FindProcsByName("darkbot_browser");
+    // require all substrings when scanning /proc.
+    auto procs = ProcUtil::FindProcsByName({"darkbot_browser", "no-sandbox", "ppapi"});
     int best_pid = -1;
     uint64_t best_memory = 0;
 
     for (int proc_pid : procs)
     {
-        if (ProcUtil::CmdlineContains(proc_pid, "no-sandbox") &&
-            ProcUtil::CmdlineContains(proc_pid, "ppapi") &&
-            ProcUtil::IsChildOf(proc_pid, m_browser_pid) &&
-            ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        if (ProcUtil::IsChildOf(proc_pid, m_browser_pid) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
             // Search for the flash process with the most memory usage,
             // since the browser can spawn multiple and we want to target the main one
@@ -933,7 +931,7 @@ bool BotClient::IsValid()
                 m_flash_sem = -1;
             }
 
-            utils::log("[IsValid] Flash process switched from {} to {}\n", missing_pid, m_flash_pid);
+            utils::log("[BotClient::IsValid] Flash process switched from {} to {}\n", missing_pid, m_flash_pid);
             m_flash_shmid = -1;
             return true;
         }

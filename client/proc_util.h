@@ -29,9 +29,7 @@ namespace ProcUtil
 
     bool IsChildOf(pid_t child_pid, pid_t test_parent);
 
-    std::vector<int> FindProcsByName(const std::string &n);
-
-    bool CmdlineContains(pid_t pid, const std::string &pattern);
+    std::vector<int> FindProcsByName(const std::initializer_list<std::string> &patterns);
 
     bool ProcessExists(pid_t pid);
 
