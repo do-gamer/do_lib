@@ -829,7 +829,7 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
     {
         fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
-        SetFlashPid(-1);
+        reset();
         return;
     }
 
@@ -909,7 +909,7 @@ bool BotClient::IsValid()
     {
         fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
-        SetFlashPid(-1);
+        reset();
         return false;
     }
 
@@ -918,11 +918,17 @@ bool BotClient::IsValid()
         return find_flash_process();
     }
 
-    if (!ProcUtil::ProcessExists(FlashPid()) && !find_flash_process())
+    if (!ProcUtil::ProcessExists(FlashPid()))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
-        Refresh();
-        return false;
+        int old_flash_pid = FlashPid();
+        reset();
+        // Try to find the flash process again, else refresh the browser.
+        if (!find_flash_process()) {
+            fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", old_flash_pid, Pid());
+            Refresh();
+            return false;
+        }
+
     }
     return true;
 }
@@ -953,8 +959,8 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
-            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
+            reset();
             return;
         }
     }
@@ -970,8 +976,8 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
+            reset();
             return;
         }
         perror("[SendFlashCommand] semop failed");
@@ -983,8 +989,8 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
+            reset();
             return;
         }
         perror("[SendFlashCommand] semop failed");
