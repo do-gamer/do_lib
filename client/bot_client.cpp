@@ -751,6 +751,9 @@ void sigchld_handler(int signal)
 
 void BotClient::Refresh()
 {
+    // remember the existing flash pid so we won't immediately pick it again
+    m_old_flash_pid = FlashPid();
+
     SendBrowserCommand("refresh", 1);
     reset();
 }
@@ -867,7 +870,12 @@ bool BotClient::find_flash_process()
 
     for (int proc_pid : procs)
     {
-        if (ProcUtil::IsChildOf(proc_pid, m_browser_pid) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        // if we just refreshed, ignore the previous flash pid; otherwise we might keep
+        // picking the same, which defeats the purpose of a refresh
+        if (proc_pid == m_old_flash_pid)
+            continue;
+
+        if (ProcUtil::IsChildOf(proc_pid, Pid()) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
             // Search for the flash process with the most memory usage,
             // since the browser can spawn multiple and we want to target the main one
@@ -883,6 +891,7 @@ bool BotClient::find_flash_process()
     if (best_pid > 0)
     {
         SetFlashPid(best_pid);
+        m_old_flash_pid = -1;
         return true;
     }
 

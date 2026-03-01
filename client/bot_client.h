@@ -123,6 +123,7 @@ private:
     int m_flash_shmid = -1;
 
     int m_browser_pid = -1, m_flash_pid = -1;
+    int m_old_flash_pid = -1; // remember flash pid before refresh to avoid reusing it
 
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
