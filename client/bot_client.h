@@ -133,6 +133,9 @@ private:
 
     bool find_flash_process();
     void reset();
+
+    // helpers for browser IPC
+    bool ensure_browser_ipc_connected();
 };
 
 

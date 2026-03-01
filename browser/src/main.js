@@ -20,6 +20,7 @@ var server = net.createServer(function (sock) {
         }
 
         if (args[0] == "refresh") {
+            console.log("[browser] Recieved refresh command, reloading...");
             mainWindow.reload();
         } else if (args.length == 2) {
             switch (args[0]) {
@@ -40,8 +41,17 @@ var server = net.createServer(function (sock) {
     });
 
     sock.on('error', (err) => {
-        console.log("Socket erro", err);
-    }); 
+        console.log("[browser] Socket error", err);
+    });
+
+    sock.on('close', (hadError) => {
+        console.log("[browser] Socket closed" + (hadError ? " (error)" : ""));
+        // client may reconnect later; the server stays listening and will emit
+        // a new connection event when that happens.  nothing to do here other
+        // than logging/debugging.
+    });
+
+    // echo data back to the client to keep the stream alive (legacy behaviour)
     sock.pipe(sock);
 });
 server.listen("/tmp/darkbot_ipc_" + process.pid);

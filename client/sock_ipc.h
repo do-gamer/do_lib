@@ -12,10 +12,17 @@ public:
 
     bool Connected() const { return m_connected; }
 
+    // try to establish a connection to the unix domain socket at |path|.
+    // if a previous socket exists it will be closed and recreated.  returns
+    // true on success, false otherwise.
     bool Connect(const std::string &path);
 
-    void Send(const std::string &msg);
+    // send a message over the socket. returns true on success; if the write
+    // fails (broken pipe, connection reset, etc) the object will mark itself
+    // disconnected so callers can attempt to reconnect.
+    bool Send(const std::string &msg);
 
+    // internal state; public for legacy code but should not be touched
     bool m_connected = false;
     int m_sock = -1;
 };

@@ -9,10 +9,7 @@
 
 SockIpc::SockIpc()
 {
-    if ((m_sock = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
-    {
-        throw std::runtime_error { "Failed to create ipc socket" };
-    }
+    m_sock = -1;
 }
 
 SockIpc::~SockIpc() 
@@ -23,24 +20,46 @@ SockIpc::~SockIpc()
     }
 }
 
+static int create_unix_socket()
+{
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0)
+        throw std::runtime_error { "Failed to create ipc socket" };
+    return s;
+}
+
 bool SockIpc::Connect(const std::string &path)
 {
+    // if we already have a socket, close it before recreating
+    if (m_sock != -1)
+    {
+        close(m_sock);
+        m_sock = -1;
+        m_connected = false;
+    }
+
+    m_sock = create_unix_socket();
+
     sockaddr_un m_remote;
     m_remote.sun_family = AF_UNIX;
     strncpy(m_remote.sun_path, path.c_str(), sizeof(m_remote.sun_path));
     m_remote.sun_path[sizeof(m_remote.sun_path) - 1] = '\0';
 
-
     if (connect(m_sock, reinterpret_cast<sockaddr *>(&m_remote), sizeof(m_remote)) < 0)
     {
+        close(m_sock);
+        m_sock = -1;
         return false;
     }
     m_connected = true;
     return true;
 }
 
-void SockIpc::Send(const std::string &msg)
+bool SockIpc::Send(const std::string &msg)
 {
+    if (!m_connected || m_sock == -1)
+        return false;
+
     const char *buf = msg.data();
     size_t to_write = msg.size();
     size_t written = 0;
@@ -54,8 +73,14 @@ void SockIpc::Send(const std::string &msg)
         }
         if (n == -1 && errno == EINTR)
             continue;
-        // on EAGAIN or other errors, bail out
-        break;
+
+        // an error occurred, mark ourselves disconnected and bail out
+        m_connected = false;
+        close(m_sock);
+        m_sock = -1;
+        return false;
     }
+
+    return true;
 }
 

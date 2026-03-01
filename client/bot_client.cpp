@@ -754,6 +754,7 @@ void BotClient::Refresh()
     // remember the existing flash pid so we won't immediately pick it again
     m_old_flash_pid = FlashPid();
 
+    utils::log("[BotClient::Refresh] Triggering browser refresh\n");
     SendBrowserCommand("refresh", 1);
     reset();
 }
@@ -826,6 +827,27 @@ void BotClient::LaunchBrowser()
     }
 }
 
+// helper used within SendBrowserCommand; returns true when the IPC
+// connection is ready (either already connected or successfully created).
+bool BotClient::ensure_browser_ipc_connected()
+{
+    if (m_browser_ipc->Connected())
+        return true;
+
+    if (Pid() < 0)
+        return false;
+
+    std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
+    //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
+    if (!m_browser_ipc->Connect(ipc_path))
+    {
+        printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
+        return false;
+    }
+
+    return true;
+}
+
 void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
@@ -836,27 +858,29 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
         return;
     }
 
-    if (!m_browser_ipc->Connected())
+    if (!ensure_browser_ipc_connected())
     {
-        if (Pid() < 0)
-        {
-            return;
-        }
-
-        std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
-
-        //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
-
-        if (!m_browser_ipc->Connect(ipc_path))
-        {
-            printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
-            return;
-        }
+        return;
     }
 
     //printf("[SendBrowserCommand] Sending message %s\n", message.c_str());
 
-    m_browser_ipc->Send(message);
+    // try to send the message; if the socket has gone away we get a failure
+    // and should attempt to re-establish the connection once before giving up.
+    if (!m_browser_ipc->Send(message))
+    {
+        fprintf(stderr, "[SendBrowserCommand] send failed, reconnecting\n");
+        // reset the ipc object so that Connect will create a fresh socket
+        m_browser_ipc.reset(new SockIpc());
+        if (ensure_browser_ipc_connected())
+        {
+            m_browser_ipc->Send(message);
+        }
+        else
+        {
+            fprintf(stderr, "[SendBrowserCommand] reconnect attempt failed\n");
+        }
+    }
     return;
 }
 
