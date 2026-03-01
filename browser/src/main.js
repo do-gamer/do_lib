@@ -22,10 +22,6 @@ var server = net.createServer(function (sock) {
         if (args[0] == "refresh") {
             mainWindow.reload();
         } else if (args.length == 2) {
-            // Ensure the main window is focused
-            if (!mainWindow.isFocused()) {
-                mainWindow.focus();
-            }
             switch (args[0]) {
                 case "keyClick":
                     handleKeyClick(mainWindow.webContents, args[1]);
