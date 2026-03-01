@@ -36,35 +36,14 @@ bool ProcUtil::IsChildOf(pid_t child_pid, pid_t test_parent)
     return false;
 }
 
-// Helper function to check if the cmdline of a process contains all provided patterns.
-static bool cmdline_matches_all(pid_t pid, const std::initializer_list<std::string> &patterns)
-{
-    if (pid <= 0 || patterns.size() == 0)
-        return false;
-
-    auto cmd_path = std::filesystem::path("/proc") / std::to_string(pid) / "cmdline";
-    std::ifstream cmdline_f { cmd_path.string(), std::ios::binary };
-    if (!cmdline_f)
-        return false;
-
-    std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
-    if (contents.empty())
-        return false;
-
-    std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
-
-    for (const auto &pat : patterns)
-    {
-        if (contents.find(pat) == std::string::npos)
-            return false;
-    }
-    return true;
-}
-
 // Concrete entry point; callers pass an initializer_list of patterns.
 std::vector<int> ProcUtil::FindProcsByName(const std::initializer_list<std::string> &patterns)
 {
     std::vector<int> result;
+
+    // nothing to search for
+    if (patterns.size() == 0)
+        return result;
 
     for (const auto &entry : std::filesystem::directory_iterator("/proc/"))
     {
@@ -74,8 +53,27 @@ std::vector<int> ProcUtil::FindProcsByName(const std::initializer_list<std::stri
         if (!entry.is_directory() || !pid)
             continue;
 
-        if (cmdline_matches_all(pid, patterns))
-            result.push_back(pid);
+        auto cmd_path = std::filesystem::path("/proc") / std::to_string(pid) / "cmdline";
+        std::ifstream cmdline_f { cmd_path.string(), std::ios::binary };
+        if (cmdline_f)
+        {
+            std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
+            if (!contents.empty())
+            {
+                std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
+                bool match = true;
+                for (const auto &pat : patterns)
+                {
+                    if (contents.find(pat) == std::string::npos)
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match)
+                    result.push_back(pid);
+            }
+        }
     }
 
     return result;

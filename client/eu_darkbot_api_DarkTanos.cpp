@@ -56,7 +56,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setMinimized
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_reload
   (JNIEnv *, jobject)
 {
-    client.SendBrowserCommand("refresh", 1);
+    client.Refresh();
 }
 
 JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_isValid

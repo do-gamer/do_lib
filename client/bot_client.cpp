@@ -730,16 +730,16 @@ BotClient::BotClient() :
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
     });
 }
 
 BotClient::~BotClient()
 {
-    if (m_browser_pid > 0)
+    if (Pid() > 0)
     {
-        kill(m_browser_pid, SIGKILL);
+        kill(Pid(), SIGKILL);
     }
 }
 
@@ -747,6 +747,12 @@ void sigchld_handler(int signal)
 {
     int status = 0;
     waitpid(0, &status, WNOHANG);
+}
+
+void BotClient::Refresh()
+{
+    SendBrowserCommand("refresh", 1);
+    reset();
 }
 
 void BotClient::LaunchBrowser()
@@ -811,7 +817,7 @@ void BotClient::LaunchBrowser()
         {
             signal(SIGCHLD, sigchld_handler);
 
-            m_browser_pid = pid;
+            SetPid(pid);
             break;
         }
     }
@@ -819,28 +825,28 @@ void BotClient::LaunchBrowser()
 
 void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 {
-    if (m_browser_pid > 0 && !ProcUtil::ProcessExists(m_browser_pid))
+    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
-        m_flash_pid = -1;
+        SetFlashPid(-1);
         return;
     }
 
     if (!m_browser_ipc->Connected())
     {
-        if (m_browser_pid < 0)
+        if (Pid() < 0)
         {
             return;
         }
 
-        std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", m_browser_pid);
+        std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
 
         //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
 
         if (!m_browser_ipc->Connect(ipc_path))
         {
-            printf("[SendBrowserCommand] Failed to connect to browser %d\n", m_browser_pid);
+            printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
             return;
         }
     }
@@ -855,6 +861,7 @@ bool BotClient::find_flash_process()
 {
     // require all substrings when scanning /proc.
     auto procs = ProcUtil::FindProcsByName({"darkbot_browser", "no-sandbox", "ppapi"});
+
     int best_pid = -1;
     uint64_t best_memory = 0;
 
@@ -875,7 +882,7 @@ bool BotClient::find_flash_process()
 
     if (best_pid > 0)
     {
-        m_flash_pid = best_pid;
+        SetFlashPid(best_pid);
         return true;
     }
 
@@ -890,7 +897,7 @@ void BotClient::reset()
 
 
     m_shared_mem_flash = nullptr;
-    m_flash_pid = -1;
+    SetFlashPid(-1);
     m_flash_sem = -1;
     m_flash_shmid = -1;
 }
@@ -898,47 +905,23 @@ void BotClient::reset()
 // Not a great name since it has side-effects like refreshgin or restarting the browser
 bool BotClient::IsValid()
 {
-    if (m_browser_pid > 0 && !ProcUtil::ProcessExists(m_browser_pid))
+    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
-        m_flash_pid = -1;
+        SetFlashPid(-1);
         return false;
     }
 
-
-    if (m_flash_pid == -1)
+    if (FlashPid() == -1)
     {
         return find_flash_process();
     }
 
-    if (!ProcUtil::ProcessExists(m_flash_pid))
+    if (!ProcUtil::ProcessExists(FlashPid()) && !find_flash_process())
     {
-        int missing_pid = m_flash_pid;
-        m_flash_pid = -1;
-
-        if (find_flash_process())
-        {
-            if (m_shared_mem_flash)
-            {
-                shmdt(m_shared_mem_flash);
-                m_shared_mem_flash = nullptr;
-            }
-
-            if (m_flash_sem >= 0)
-            {
-                semctl(m_flash_sem, 0, IPC_RMID, 1);
-                m_flash_sem = -1;
-            }
-
-            utils::log("[BotClient::IsValid] Flash process switched from {} to {}\n", missing_pid, m_flash_pid);
-            m_flash_shmid = -1;
-            return true;
-        }
-
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", missing_pid, m_browser_pid);
-        SendBrowserCommand("refresh", 1);
-        reset();
+        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
+        Refresh();
         return false;
     }
     return true;
@@ -951,7 +934,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         return;
     }
 
-    if ((m_flash_shmid = shmget(m_flash_pid, MEM_SIZE, IPC_CREAT | 0666)) < 0)
+    if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
         fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
         return;
@@ -968,9 +951,9 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
 
     if (m_flash_sem < 0)
     {
-        if ((m_flash_sem = semget(m_flash_pid , 2, IPC_CREAT | 0600)) < 0)
+        if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
-            m_flash_pid = -1;
+            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
             return;
         }
@@ -987,6 +970,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
+            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
             return;
         }
@@ -999,6 +983,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
+            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
             return;
         }
@@ -1093,7 +1078,7 @@ void BotClient::SendText(const std::string &text)
 
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         mouse::send_button(display, window, x, y, Button1, true, true);
     });
     UpdateCursorMarker(x, y);
@@ -1101,7 +1086,7 @@ void BotClient::MouseClick(int32_t x, int32_t y)
 
 void BotClient::MouseMove(int32_t x, int32_t y)
 {
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         mouse::send_move(display, window, x, y);
     });
     UpdateCursorMarker(x, y);
@@ -1109,7 +1094,7 @@ void BotClient::MouseMove(int32_t x, int32_t y)
 
 void BotClient::MouseDown(int32_t x, int32_t y)
 {
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         mouse::send_button(display, window, x, y, Button1, true, false);
     });
     UpdateCursorMarker(x, y);
@@ -1117,7 +1102,7 @@ void BotClient::MouseDown(int32_t x, int32_t y)
 
 void BotClient::MouseUp(int32_t x, int32_t y)
 {
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         mouse::send_button(display, window, x, y, Button1, false, true);
     });
     UpdateCursorMarker(x, y);
@@ -1126,7 +1111,7 @@ void BotClient::MouseUp(int32_t x, int32_t y)
 void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
     int button = delta >= 0 ? Button4 : Button5;
-    window::with_browser(m_flash_pid, m_browser_pid, [=](Display *display, Window window) {
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
         mouse::send_wheel(display, window, x, y, button);
     });
     UpdateCursorMarker(x, y);
@@ -1227,5 +1212,5 @@ void BotClient::EnableCursorMarker(bool enable)
 
 void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
 {
-    cursor_marker::update(x, y, m_flash_pid, m_browser_pid);
+    cursor_marker::update(x, y, FlashPid(), Pid());
 }

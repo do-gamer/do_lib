@@ -19,9 +19,11 @@ public:
         m_url = url;
     }
 
+    void Refresh();
     void LaunchBrowser();
 
     void SetPid(int pid) { m_browser_pid = pid; }
+    void SetFlashPid(int pid) { m_flash_pid = pid; }
     inline int Pid() const { return m_browser_pid; }
     inline int FlashPid() const { return m_flash_pid; }
 
