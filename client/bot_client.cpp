@@ -929,15 +929,9 @@ bool BotClient::IsValid()
 
     if (!ProcUtil::ProcessExists(FlashPid()))
     {
-        int old_flash_pid = FlashPid();
-        reset();
-        // Try to find the flash process again, else refresh the browser.
-        if (!find_flash_process()) {
-            fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", old_flash_pid, Pid());
-            Refresh();
-            return false;
-        }
-
+        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
+        Refresh();
+        return false;
     }
     return true;
 }
@@ -986,7 +980,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            reset();
+            Refresh();
             return;
         }
         perror("[SendFlashCommand] semop failed");
@@ -999,7 +993,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            reset();
+            Refresh();
             return;
         }
         perror("[SendFlashCommand] semop failed");
