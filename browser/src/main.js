@@ -12,7 +12,7 @@ const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./ke
 var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
-    sock.on('data', async (data) => {
+    sock.on('data', (data) => {
         let args = data.split("|");
 
         if (args.length == 0 || !mainWindow) {
@@ -33,7 +33,7 @@ var server = net.createServer(function (sock) {
                     handleKeyUp(mainWindow.webContents, args[1]);
                     break;
                 case "text":
-                    await handleText(mainWindow.webContents, args[1]);
+                    handleText(mainWindow.webContents, args[1]);
                     break;
             }
         }
