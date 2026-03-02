@@ -751,11 +751,21 @@ void sigchld_handler(int signal)
 
 void BotClient::Refresh()
 {
-    // remember the existing flash pid so we won't immediately pick it again
-    m_old_flash_pid = FlashPid();
+    // remember the existing flash pid so the refresh logic doesn't immediately
+    // pick the same child process again during flash detection.
+    if (FlashPid() > 0)
+        m_old_flash_pid = FlashPid();
 
     utils::log("[BotClient::Refresh] Triggering browser refresh\n");
-    SendBrowserCommand("refresh", 1);
+
+    if (!ensure_browser_ipc_connected() || !m_browser_ipc->Send("refresh"))
+    {
+        utils::log("[BotClient::Refresh] refresh command failed\n");
+        // reset IPC state so future commands will reconnect.
+        m_browser_ipc.reset(new SockIpc());
+        return;
+    }
+
     reset();
 }
 
@@ -860,21 +870,24 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
     if (!ensure_browser_ipc_connected())
     {
+        fprintf(stderr, "[SendBrowserCommand] cannot connect to browser ipc\n");
         return;
     }
 
     //printf("[SendBrowserCommand] Sending message %s\n", message.c_str());
 
-    // try to send the message; if the socket has gone away we get a failure
-    // and should attempt to re-establish the connection once before giving up.
+    // attempt to send the message.  if we get a failure then we assume the
+    // browser side is no longer responding; try a single reconnect.
     if (!m_browser_ipc->Send(message))
     {
         fprintf(stderr, "[SendBrowserCommand] send failed, reconnecting\n");
-        // reset the ipc object so that Connect will create a fresh socket
         m_browser_ipc.reset(new SockIpc());
         if (ensure_browser_ipc_connected())
         {
-            m_browser_ipc->Send(message);
+            if (!m_browser_ipc->Send(message))
+            {
+                fprintf(stderr, "[SendBrowserCommand] send failed after reconnect\n");
+            }
         }
         else
         {
