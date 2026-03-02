@@ -34,7 +34,8 @@ public:
     void SendBrowserCommand(const std::string &&s);
     void ToggleBrowserVisibility(bool visible);
 
-    void SendFlashCommand(Message *message, Message *response = nullptr);
+    // returns true if the command was successfully processed by flash
+    bool SendFlashCommand(Message *message, Message *response = nullptr);
 
     bool RefineOre(uintptr_t refine_util, uint32_t ore, uint32_t amount);
     bool SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args);

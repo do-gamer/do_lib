@@ -649,6 +649,8 @@ enum class MessageType
     REFINE,
     UPGRADE,
     USE_ITEM,
+    KEY_CLICK,
+    MOUSE_CLICK,
     CHECK_SIGNATURE,
 
     NONE
@@ -699,6 +701,20 @@ struct UseItemMessage
 
 };
 
+struct KeyClickMessage
+{
+    MessageType type = MessageType::KEY_CLICK;
+    uint32_t key;
+};
+
+struct MouseClickMessage
+{
+    MessageType type = MessageType::MOUSE_CLICK;
+    uint32_t button;
+    int32_t x;
+    int32_t y;
+};
+
 struct GetSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -719,6 +735,8 @@ union Message
     SendNotificationMessage notify;
     RefineMessage refine;
     UseItemMessage item;
+    KeyClickMessage key;
+    MouseClickMessage click;
     GetSignatureMessage sig;
 };
 
@@ -1082,17 +1100,20 @@ bool BotClient::IsValid()
     return true;
 }
 
-void BotClient::SendFlashCommand(Message *message, Message *response)
+/**
+ * Sends a command message to the flash process via shared memory and semaphores, and optionally waits for a response.
+ */
+bool BotClient::SendFlashCommand(Message *message, Message *response)
 {
     if (!IsValid())
     {
-        return;
+        return false;
     }
 
     if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
         fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
-        return;
+        return false;
     }
 
     if (!m_shared_mem_flash || m_shared_mem_flash == (void *)-1)
@@ -1100,7 +1121,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to attach shared memory to our process\n");
-            return;
+            return false;
         }
     }
 
@@ -1110,7 +1131,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         {
             SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
-            return;
+            return false;
         }
     }
 
@@ -1120,34 +1141,43 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     static timespec timeout { .tv_sec = 1, .tv_nsec = 0 };
     sembuf sop[2] { { 0, -1, 0 }, { 1, 0, 0 } };
 
+    bool success = true;
+
     // Notify
     if (semtimedop(m_flash_sem, &sop[0], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
-            return;
+            success = false;
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+            success = false;
+        }
     }
 
     // Wait
-    if (semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
+    if (success && semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
-            return;
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+        }
+        success = false;
     }
 
-    if (response)
+    if (response && success)
     {
         memcpy(response, m_shared_mem_flash, sizeof(Message));
     }
+
+    return success;
 }
 
 bool BotClient::SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args)
@@ -1211,7 +1241,16 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 
 void BotClient::KeyClick(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyClick|{}", key));
+    // First try flash IPC for better reliability
+    Message message;
+    message.type = MessageType::KEY_CLICK;
+    message.key.key = key;
+
+    if (!SendFlashCommand(&message))
+    {
+        // if flash IPC failed, fall back to sending command to browser
+        SendBrowserCommand(utils::format("keyClick|{}", key));
+    }
 }
 
 void BotClient::KeyDown(uint32_t key)
@@ -1233,9 +1272,20 @@ void BotClient::SendText(const std::string &text)
 
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        mouse::send_button(display, browser, x, y, Button1, true, true);
-    });
+    // First try flash IPC for better reliability
+    Message message;
+    message.type = MessageType::MOUSE_CLICK;
+    message.click.x = x;
+    message.click.y = y;
+    message.click.button = 1;
+
+    if (!SendFlashCommand(&message))
+    {
+        // if flash IPC failed, fall back to sending native X11 event
+        window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+            mouse::send_button(display, browser, x, y, Button1, true, true);
+        });
+    }
     UpdateCursorMarker(x, y);
 }
 
