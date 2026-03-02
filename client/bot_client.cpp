@@ -782,7 +782,7 @@ void BotClient::Refresh()
     if (!ensure_browser_ipc_connected() || !m_browser_ipc->Send("refresh"))
     {
         utils::log("[BotClient::Refresh] refresh command failed\n");
-        // reset IPC state so future commands will reconnect.
+        // Stop the heartbeat thread and reset IPC so we can attempt to reconnect
         stop_heartbeat();
         m_browser_ipc.reset(new SockIpc());
         return;
@@ -790,9 +790,8 @@ void BotClient::Refresh()
 
     // if there's an existing flash process, kill it so we don't keep
     // reusing the same PID after a refresh.
-    if (FlashPid() > 0) {
+    if (FlashPid() > 0)
         kill(FlashPid(), SIGKILL);
-    }
 
     reset();
 }
@@ -806,9 +805,6 @@ void BotClient::LaunchBrowser()
         fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
         return;
     }
-
-    // Set flag to restore visability if needed
-    m_need_restore_visibility = true;
 
     int pid = fork();
 
@@ -953,6 +949,8 @@ void BotClient::heartbeat_loop()
                 {
                     std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
                     m_last_pong = std::chrono::steady_clock::now();
+                    // successful heartbeat, clear any past failures
+                    m_ping_failures = 0;
                 }
             }
         }
@@ -963,15 +961,36 @@ void BotClient::heartbeat_loop()
             if (m_last_pong.time_since_epoch().count() != 0 &&
                 std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(5))
             {
+                // increment failure counter and decide what to do
+                m_ping_failures++;
+
+                if (m_ping_failures <= 2)
+                {
+                    utils::log("[BotClient::heartbeat] no pong received, attempt {} - refreshing browser\n", m_ping_failures);
+                    // just refresh the existing browser instance and keep
+                    // the heartbeat thread running; if the refresh succeeds
+                    // the next loop will reset the counter above
+                    Refresh();
+                    // skip the kill/restart logic this iteration
+                    continue;
+                }
+
                 utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
 
-                // kill existing processes & reset state
+                // reset counter now that we're going to rebuild everything
+                m_ping_failures = 0;
+
+                // kill existing processes & reset state (same as earlier restart code)
                 if (Pid() > 0)
                     kill(Pid(), SIGKILL);
                 if (FlashPid() > 0)
                     kill(FlashPid(), SIGKILL);
+
                 reset();
                 stop_heartbeat(); // gracefully wind down current thread
+
+                // Set flag to restore visability after we relaunch
+                m_need_restore_visibility = true;
 
                 // create a fresh ipc object; a new thread will be spun when
                 // ensure_browser_ipc_connected() is called later.
@@ -1149,13 +1168,12 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
-            success = false;
         }
         else
         {
             perror("[SendFlashCommand] semop failed");
-            success = false;
         }
+        success = false;
     }
 
     // Wait

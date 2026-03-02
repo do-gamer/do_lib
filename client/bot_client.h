@@ -139,6 +139,12 @@ private:
     std::chrono::steady_clock::time_point m_last_pong;
     std::mutex m_heartbeat_mutex;
 
+    // number of consecutive heartbeat failures (no pong) seen in the
+    // current session; used to decide when to simply refresh vs fully
+    // kill/restart the browser process.  This counter is reset whenever a
+    // successful pong is received.
+    int m_ping_failures = 0;
+
     std::string normalized_sid() const;
     bool is_valid_browser_process(int pid, const char *source = nullptr) const;
 
