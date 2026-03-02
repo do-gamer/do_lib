@@ -973,7 +973,7 @@ void BotClient::heartbeat_loop()
     }
 }
 
-void BotClient::SendBrowserCommand(const std::string &&message, int sync)
+void BotClient::SendBrowserCommand(const std::string &&message)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
@@ -1213,22 +1213,24 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 
 void BotClient::KeyClick(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyClick|{}", key), 1);
+    SendBrowserCommand(utils::format("keyClick|{}", key));
 }
 
 void BotClient::KeyDown(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyDown|{}", key), 1);
+    SendBrowserCommand(utils::format("keyDown|{}", key));
 }
 
 void BotClient::KeyUp(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyUp|{}", key), 1);
+    SendBrowserCommand(utils::format("keyUp|{}", key));
 }
 
 void BotClient::SendText(const std::string &text)
 {
-    SendBrowserCommand(utils::format("text|{}", text), 1);
+    SendBrowserCommand(utils::format("text|{}", text));
+    // small delay to allow browser to process text input
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
 void BotClient::MouseClick(int32_t x, int32_t y)

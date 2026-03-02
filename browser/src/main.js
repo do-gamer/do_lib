@@ -41,6 +41,16 @@ var server = net.createServer(function (sock) {
 
                 // handle events
                 switch (args[0]) {
+                    case "setSize":
+                        // resize the browser window to the given width and height
+                        if (args.length == 3) {
+                            let w = parseInt(args[1]);
+                            let h = parseInt(args[2]);
+                            if (!isNaN(w) && !isNaN(h)) {
+                                mainWindow.setSize(w, h);
+                            }
+                        }
+                        return;
                     case "keyClick":
                         handleKeyClick(mainWindow.webContents, args[1]);
                         return;

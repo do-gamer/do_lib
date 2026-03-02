@@ -31,7 +31,7 @@ public:
 
     bool IsValid();
 
-    void SendBrowserCommand(const std::string &&s, int sync);
+    void SendBrowserCommand(const std::string &&s);
     void ToggleBrowserVisibility(bool visible);
 
     void SendFlashCommand(Message *message, Message *response = nullptr);
