@@ -31,7 +31,7 @@ public:
 
     bool IsValid();
 
-    void SendBrowserCommand(const std::string &&s);
+    bool SendBrowserCommand(const std::string &s);
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash

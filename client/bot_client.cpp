@@ -761,7 +761,7 @@ void BotClient::ToggleBrowserVisibility(bool visible)
 BotClient::~BotClient()
 {
     // stop the heartbeat thread before tearing down
-    stop_heartbeat();
+    //stop_heartbeat();
 
     if (Pid() > 0)
     {
@@ -775,15 +775,17 @@ void sigchld_handler(int signal)
     waitpid(0, &status, WNOHANG);
 }
 
+
 void BotClient::Refresh()
 {
-    utils::log("[BotClient::Refresh] Triggering browser refresh\n");
+    utils::log("[Refresh] Triggering browser refresh\n");
 
-    if (!ensure_browser_ipc_connected() || !m_browser_ipc->Send("refresh"))
+    if (!SendBrowserCommand("refresh"))
     {
-        utils::log("[BotClient::Refresh] refresh command failed\n");
-        // Stop the heartbeat thread and reset IPC so we can attempt to reconnect
-        stop_heartbeat();
+        utils::log("[Refresh] refresh command failed\n");
+        // Stop the heartbeat thread 
+        //stop_heartbeat();
+        // Reset IPC so we can attempt to reconnect
         m_browser_ipc.reset(new SockIpc());
         return;
     }
@@ -883,7 +885,7 @@ bool BotClient::ensure_browser_ipc_connected()
     }
 
     // once we have a fresh connection, start heartbeat monitoring
-    start_heartbeat();
+    // start_heartbeat();
     // and restore browser visibility if needed
     restore_browser_visibility_if_needed();
     return true;
@@ -945,7 +947,7 @@ void BotClient::heartbeat_loop()
             std::string msg;
             if (m_browser_ipc->Recv(msg))
             {
-                if (msg.find("pong") != std::string::npos)
+                if (msg.find("ping|ok") != std::string::npos)
                 {
                     std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
                     m_last_pong = std::chrono::steady_clock::now();
@@ -1010,43 +1012,60 @@ void BotClient::heartbeat_loop()
     }
 }
 
-void BotClient::SendBrowserCommand(const std::string &&message)
+bool BotClient::SendBrowserCommand(const std::string &message)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
-        return;
+        return false;
     }
 
     if (!ensure_browser_ipc_connected())
     {
-        return;
+        return false;
     }
 
-    //printf("[SendBrowserCommand] Sending message %s\n", message.c_str());
+    std::string expected_ack = message + "|ok";
+    int maxAttempts = 3;
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
 
-    // attempt to send the message.  if we get a failure then we assume the
-    // browser side is no longer responding; try a single reconnect.
-    if (!m_browser_ipc->Send(message))
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
     {
-        fprintf(stderr, "[SendBrowserCommand] send failed, reconnecting\n");
-        stop_heartbeat();
-        m_browser_ipc.reset(new SockIpc());
-        if (ensure_browser_ipc_connected())
+        if (!m_browser_ipc->Send(message))
         {
-            if (!m_browser_ipc->Send(message))
+            utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
+            // try reconnect
+            // stop_heartbeat();
+            m_browser_ipc.reset(new SockIpc());
+            if (!ensure_browser_ipc_connected())
             {
-                fprintf(stderr, "[SendBrowserCommand] send failed after reconnect\n");
+                utils::log("[SendBrowserCommand] reconnect attempt failed\n");
+                return false;
             }
+            continue; // retry send
         }
-        else
+
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
         {
-            fprintf(stderr, "[SendBrowserCommand] reconnect attempt failed\n");
+            std::string reply;
+            if (m_browser_ipc->Recv(reply))
+            {
+                if (reply.find(expected_ack) != std::string::npos)
+                {
+                    return true; // success
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+
+        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", message, attempt, maxAttempts);
     }
-    return;
+
+    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", message);
+    return false;
 }
 
 bool BotClient::find_flash_process()
