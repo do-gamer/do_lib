@@ -31,7 +31,7 @@
 
 namespace window
 {
-    Window browser = 0;
+    Window browser_window = 0;
 
     struct Property
     {
@@ -362,14 +362,14 @@ namespace window
             return;
         }
 
-        if (!browser || !try_get_attrs(display, browser))
+        if (!browser_window || !try_get_attrs(display, browser_window))
         {
-            browser = resolve_client(display, browser_pid);
+            browser_window = resolve_client(display, browser_pid);
         }
 
-        if (browser)
+        if (browser_window)
         {
-            action(display, browser);
+            action(display, browser_window);
         }
 
         XFlush(display);
@@ -619,11 +619,11 @@ namespace cursor_marker
         if (state.window && state.display)
         {
             // translate coordinates from browser window space to root (screen) space
-            window::with_browser(flash_pid, browser_pid, [&](Display *display, Window window) {
+            window::with_browser(flash_pid, browser_pid, [&](Display *display, Window browser) {
                 Window root = DefaultRootWindow(display);
                 int root_x = 0, root_y = 0;
                 Window child = 0;
-                XTranslateCoordinates(display, window, root, x, y, &root_x, &root_y, &child);
+                XTranslateCoordinates(display, browser, root, x, y, &root_x, &root_y, &child);
 
                 // move marker on its own display (should be same as 'display' but we stored earlier when created)
                 const int offset = static_cast<int>(std::lround(dot_size / 2.0));
@@ -732,8 +732,11 @@ BotClient::BotClient() :
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        visible ? XMapWindow(display, window) : XUnmapWindow(display, window);
+    // store the last requested state
+    m_browser_visible = visible;
+
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        visible ? XMapWindow(display, browser) : XUnmapWindow(display, browser);
     });
 }
 
@@ -785,6 +788,9 @@ void BotClient::LaunchBrowser()
         fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
         return;
     }
+
+    // Set flag to restore visability if needed
+    m_need_restore_visibility = true;
 
     int pid = fork();
 
@@ -864,9 +870,21 @@ bool BotClient::ensure_browser_ipc_connected()
 
     // once we have a fresh connection, start heartbeat monitoring
     start_heartbeat();
+    // and restore browser visibility if needed
+    restore_browser_visibility_if_needed();
     return true;
 }
 
+
+// helper for browser visibility restoration
+void BotClient::restore_browser_visibility_if_needed()
+{
+    if (m_need_restore_visibility)
+    {
+        ToggleBrowserVisibility(m_browser_visible);
+        m_need_restore_visibility = false;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // heartbeat helpers
@@ -925,7 +943,7 @@ void BotClient::heartbeat_loop()
         {
             std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
             if (m_last_pong.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(6))
+                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(10))
             {
                 utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
 
@@ -967,7 +985,6 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
 
     if (!ensure_browser_ipc_connected())
     {
-        fprintf(stderr, "[SendBrowserCommand] cannot connect to browser ipc\n");
         return;
     }
 
@@ -1216,32 +1233,32 @@ void BotClient::SendText(const std::string &text)
 
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        mouse::send_button(display, window, x, y, Button1, true, true);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        mouse::send_button(display, browser, x, y, Button1, true, true);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseMove(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        mouse::send_move(display, window, x, y);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        mouse::send_move(display, browser, x, y);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseDown(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        mouse::send_button(display, window, x, y, Button1, true, false);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        mouse::send_button(display, browser, x, y, Button1, true, false);
     });
     UpdateCursorMarker(x, y);
 }
 
 void BotClient::MouseUp(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        mouse::send_button(display, window, x, y, Button1, false, true);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        mouse::send_button(display, browser, x, y, Button1, false, true);
     });
     UpdateCursorMarker(x, y);
 }
@@ -1249,8 +1266,8 @@ void BotClient::MouseUp(int32_t x, int32_t y)
 void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
     int button = delta >= 0 ? Button4 : Button5;
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window window) {
-        mouse::send_wheel(display, window, x, y, button);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        mouse::send_wheel(display, browser, x, y, button);
     });
     UpdateCursorMarker(x, y);
 }

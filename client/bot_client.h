@@ -126,6 +126,10 @@ private:
 
     int m_browser_pid = -1, m_flash_pid = -1;
 
+    // remember desired browser visibility so we can restore after restart
+    bool m_browser_visible = true;
+    bool m_need_restore_visibility = false;
+
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
 
@@ -142,6 +146,9 @@ private:
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();
+
+    // utilities for managing browser visibility state
+    void restore_browser_visibility_if_needed();
 
     // heartbeat helpers
     void start_heartbeat();
