@@ -22,6 +22,10 @@ public:
     // disconnected so callers can attempt to reconnect.
     bool Send(const std::string &msg);
 
+    // try to read a message from the socket. returns true if any data was read.
+    // the call is non‑blocking and will mark the object disconnected on failure.
+    bool Recv(std::string &msg);
+
     // internal state; public for legacy code but should not be touched
     bool m_connected = false;
     int m_sock = -1;

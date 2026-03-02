@@ -95,3 +95,27 @@ bool SockIpc::Send(const std::string &msg)
     return true;
 }
 
+// non-blocking receive; returns true if data was read into msg.
+bool SockIpc::Recv(std::string &msg)
+{
+    if (!m_connected || m_sock == -1)
+        return false;
+
+    char buf[1024];
+    ssize_t n = recv(m_sock, buf, sizeof(buf) - 1, MSG_DONTWAIT);
+    if (n <= 0)
+    {
+        if (n == 0 || (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK))
+        {
+            m_connected = false;
+            close(m_sock);
+            m_sock = -1;
+        }
+        return false;
+    }
+
+    buf[n] = '\0';
+    msg.assign(buf, static_cast<size_t>(n));
+    return true;
+}
+

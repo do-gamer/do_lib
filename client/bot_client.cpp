@@ -726,6 +726,8 @@ union Message
 BotClient::BotClient() :
     m_browser_ipc(new SockIpc())
 {
+    // ensure heartbeat state starts clean
+    m_heartbeat_running = false;
 }
 
 void BotClient::ToggleBrowserVisibility(bool visible)
@@ -737,6 +739,9 @@ void BotClient::ToggleBrowserVisibility(bool visible)
 
 BotClient::~BotClient()
 {
+    // stop the heartbeat thread before tearing down
+    stop_heartbeat();
+
     if (Pid() > 0)
     {
         kill(Pid(), SIGKILL);
@@ -757,6 +762,7 @@ void BotClient::Refresh()
     {
         utils::log("[BotClient::Refresh] refresh command failed\n");
         // reset IPC state so future commands will reconnect.
+        stop_heartbeat();
         m_browser_ipc.reset(new SockIpc());
         return;
     }
@@ -856,7 +862,97 @@ bool BotClient::ensure_browser_ipc_connected()
         return false;
     }
 
+    // once we have a fresh connection, start heartbeat monitoring
+    start_heartbeat();
     return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// heartbeat helpers
+
+void BotClient::start_heartbeat()
+{
+    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
+    if (m_heartbeat_running)
+        return;
+
+    m_last_pong = std::chrono::steady_clock::now();
+    m_heartbeat_running = true;
+    // create a detached worker thread; it will exit when m_heartbeat_running
+    // is cleared and the loop returns.
+    std::thread(&BotClient::heartbeat_loop, this).detach();
+}
+
+void BotClient::stop_heartbeat()
+{
+    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
+    m_heartbeat_running = false;
+}
+
+void BotClient::heartbeat_loop()
+{
+    while (true)
+    {
+        {
+            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
+            if (!m_heartbeat_running)
+                break;
+        }
+
+        // if we lost the ipc connection try to re-establish it
+        if (m_browser_ipc && !m_browser_ipc->Connected() && Pid() >= 0)
+        {
+            ensure_browser_ipc_connected();
+        }
+
+        if (m_browser_ipc && m_browser_ipc->Connected())
+        {
+            m_browser_ipc->Send("ping");
+
+            std::string msg;
+            if (m_browser_ipc->Recv(msg))
+            {
+                if (msg.find("pong") != std::string::npos)
+                {
+                    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
+                    m_last_pong = std::chrono::steady_clock::now();
+                }
+            }
+        }
+
+        // check timeout/heartbeat failure
+        {
+            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
+            if (m_last_pong.time_since_epoch().count() != 0 &&
+                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(6))
+            {
+                utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
+
+                // kill existing processes & reset state
+                if (Pid() > 0)
+                    kill(Pid(), SIGKILL);
+                if (FlashPid() > 0)
+                    kill(FlashPid(), SIGKILL);
+                reset();
+                stop_heartbeat(); // gracefully wind down current thread
+
+                // create a fresh ipc object; a new thread will be spun when
+                // ensure_browser_ipc_connected() is called later.
+                m_browser_ipc.reset(new SockIpc());
+
+                // spawn a detached helper to launch browser so we don't block
+                std::thread([this]() {
+                    LaunchBrowser();
+                }).detach();
+
+                // break out of loop since we stopped heartbeat
+                break;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
 }
 
 void BotClient::SendBrowserCommand(const std::string &&message, int sync)
@@ -882,6 +978,7 @@ void BotClient::SendBrowserCommand(const std::string &&message, int sync)
     if (!m_browser_ipc->Send(message))
     {
         fprintf(stderr, "[SendBrowserCommand] send failed, reconnecting\n");
+        stop_heartbeat();
         m_browser_ipc.reset(new SockIpc());
         if (ensure_browser_ipc_connected())
         {

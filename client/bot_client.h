@@ -2,6 +2,8 @@
 #define BOT_CLIENT_H
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <chrono>
 #include "proc_util.h"
 
 class SockIpc;
@@ -127,6 +129,11 @@ private:
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
 
+    // heartbeat bookkeeping for the Electron IPC link
+    bool m_heartbeat_running = false;
+    std::chrono::steady_clock::time_point m_last_pong;
+    std::mutex m_heartbeat_mutex;
+
     std::string normalized_sid() const;
     bool is_valid_browser_process(int pid, const char *source = nullptr) const;
 
@@ -135,6 +142,11 @@ private:
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();
+
+    // heartbeat helpers
+    void start_heartbeat();
+    void stop_heartbeat();
+    void heartbeat_loop();
 };
 
 

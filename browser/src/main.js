@@ -13,30 +13,47 @@ var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
     sock.on('data', (data) => {
-        let args = data.split("|");
-
-        if (args.length == 0 || !mainWindow) {
+        // strip any trailing newline, whitespace
+        let msg = data.trim();
+        if (msg === '') {
+            confirm.log("[browser] Received empty message, ignoring");
+            return;
+        }
+        if (!mainWindow) {
+            confirm.log("[browser] Received message but mainWindow is not initialized, ignoring");
             return;
         }
 
-        if (args[0] == "refresh") {
-            console.log("[browser] Recieved refresh command, reloading...");
-            mainWindow.reload();
-        } else if (args.length == 2) {
-            switch (args[0]) {
-                case "keyClick":
-                    handleKeyClick(mainWindow.webContents, args[1]);
-                    break
-                case "keyDown":
-                    handleKeyDown(mainWindow.webContents, args[1]);
-                    break;
-                case "keyUp":
-                    handleKeyUp(mainWindow.webContents, args[1]);
-                    break;
-                case "text":
-                    handleText(mainWindow.webContents, args[1]);
-                    break;
-            }
+        switch (msg) {
+            case "ping":
+                // respond to heartbeat ping directly
+                sock.write('pong');
+                return;
+            case "refresh":
+                console.log("[browser] Received refresh command, reloading...");
+                mainWindow.reload();
+                return;
+            default:
+                let args = msg.split("|");
+                if (args.length < 2) {
+                    return;
+                }
+
+                // handle events
+                switch (args[0]) {
+                    case "keyClick":
+                        handleKeyClick(mainWindow.webContents, args[1]);
+                        return;
+                    case "keyDown":
+                        handleKeyDown(mainWindow.webContents, args[1]);
+                        return;
+                    case "keyUp":
+                        handleKeyUp(mainWindow.webContents, args[1]);
+                        return;
+                    case "text":
+                        handleText(mainWindow.webContents, args[1]);
+                        return;
+                }
         }
     });
 
