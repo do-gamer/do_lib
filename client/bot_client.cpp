@@ -943,7 +943,7 @@ void BotClient::heartbeat_loop()
         {
             std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
             if (m_last_pong.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(10))
+                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(5))
             {
                 utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
 
@@ -969,7 +969,7 @@ void BotClient::heartbeat_loop()
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
 
@@ -1108,8 +1108,8 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
+            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
-            reset();
             return;
         }
     }
@@ -1125,8 +1125,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            Refresh();
+            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
             return;
         }
         perror("[SendFlashCommand] semop failed");
@@ -1138,8 +1137,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            Refresh();
+            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
             return;
         }
         perror("[SendFlashCommand] semop failed");
