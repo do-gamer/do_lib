@@ -2,8 +2,6 @@
 #define BOT_CLIENT_H
 #include <memory>
 #include <mutex>
-#include <thread>
-#include <chrono>
 #include "proc_util.h"
 
 class SockIpc;
@@ -127,40 +125,14 @@ private:
 
     int m_browser_pid = -1, m_flash_pid = -1;
 
-    // remember desired browser visibility so we can restore after restart
-    bool m_browser_visible = true;
-    bool m_need_restore_visibility = false;
-
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
-
-    // heartbeat bookkeeping for the Electron IPC link
-    bool m_heartbeat_running = false;
-    std::chrono::steady_clock::time_point m_last_pong;
-    std::mutex m_heartbeat_mutex;
-
-    // number of consecutive heartbeat failures (no pong) seen in the
-    // current session; used to decide when to simply refresh vs fully
-    // kill/restart the browser process.  This counter is reset whenever a
-    // successful pong is received.
-    int m_ping_failures = 0;
-
-    std::string normalized_sid() const;
-    bool is_valid_browser_process(int pid, const char *source = nullptr) const;
 
     bool find_flash_process();
     void reset();
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();
-
-    // utilities for managing browser visibility state
-    void restore_browser_visibility_if_needed();
-
-    // heartbeat helpers
-    void start_heartbeat();
-    void stop_heartbeat();
-    void heartbeat_loop();
 };
 
 

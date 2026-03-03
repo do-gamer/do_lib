@@ -740,19 +740,10 @@ union Message
     GetSignatureMessage sig;
 };
 
-
-BotClient::BotClient() :
-    m_browser_ipc(new SockIpc())
-{
-    // ensure heartbeat state starts clean
-    m_heartbeat_running = false;
-}
+BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    // store the last requested state
-    m_browser_visible = visible;
-
     window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
         visible ? XMapWindow(display, browser) : XUnmapWindow(display, browser);
     });
@@ -760,9 +751,6 @@ void BotClient::ToggleBrowserVisibility(bool visible)
 
 BotClient::~BotClient()
 {
-    // stop the heartbeat thread before tearing down
-    //stop_heartbeat();
-
     if (Pid() > 0)
     {
         kill(Pid(), SIGKILL);
@@ -783,8 +771,6 @@ void BotClient::Refresh()
     if (!SendBrowserCommand("refresh"))
     {
         utils::log("[Refresh] refresh command failed\n");
-        // Stop the heartbeat thread 
-        //stop_heartbeat();
         // Reset IPC so we can attempt to reconnect
         m_browser_ipc.reset(new SockIpc());
         return;
@@ -883,134 +869,9 @@ bool BotClient::ensure_browser_ipc_connected()
         printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
         return false;
     }
-
-    // once we have a fresh connection, start heartbeat monitoring
-    // start_heartbeat();
-    // and restore browser visibility if needed
-    restore_browser_visibility_if_needed();
     return true;
 }
 
-
-// helper for browser visibility restoration
-void BotClient::restore_browser_visibility_if_needed()
-{
-    if (m_need_restore_visibility)
-    {
-        ToggleBrowserVisibility(m_browser_visible);
-        m_need_restore_visibility = false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// heartbeat helpers
-
-void BotClient::start_heartbeat()
-{
-    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-    if (m_heartbeat_running)
-        return;
-
-    m_last_pong = std::chrono::steady_clock::now();
-    m_heartbeat_running = true;
-    // create a detached worker thread; it will exit when m_heartbeat_running
-    // is cleared and the loop returns.
-    std::thread(&BotClient::heartbeat_loop, this).detach();
-}
-
-void BotClient::stop_heartbeat()
-{
-    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-    m_heartbeat_running = false;
-}
-
-void BotClient::heartbeat_loop()
-{
-    while (true)
-    {
-        {
-            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-            if (!m_heartbeat_running)
-                break;
-        }
-
-        // if we lost the ipc connection try to re-establish it
-        if (m_browser_ipc && !m_browser_ipc->Connected() && Pid() >= 0)
-        {
-            ensure_browser_ipc_connected();
-        }
-
-        if (m_browser_ipc && m_browser_ipc->Connected())
-        {
-            m_browser_ipc->Send("ping");
-
-            std::string msg;
-            if (m_browser_ipc->Recv(msg))
-            {
-                if (msg.find("ping|ok") != std::string::npos)
-                {
-                    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-                    m_last_pong = std::chrono::steady_clock::now();
-                    // successful heartbeat, clear any past failures
-                    m_ping_failures = 0;
-                }
-            }
-        }
-
-        // check timeout/heartbeat failure
-        {
-            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-            if (m_last_pong.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(5))
-            {
-                // increment failure counter and decide what to do
-                m_ping_failures++;
-
-                if (m_ping_failures <= 2)
-                {
-                    utils::log("[BotClient::heartbeat] no pong received, attempt {} - refreshing browser\n", m_ping_failures);
-                    // just refresh the existing browser instance and keep
-                    // the heartbeat thread running; if the refresh succeeds
-                    // the next loop will reset the counter above
-                    Refresh();
-                    // skip the kill/restart logic this iteration
-                    continue;
-                }
-
-                utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
-
-                // reset counter now that we're going to rebuild everything
-                m_ping_failures = 0;
-
-                // kill existing processes & reset state (same as earlier restart code)
-                if (Pid() > 0)
-                    kill(Pid(), SIGKILL);
-                if (FlashPid() > 0)
-                    kill(FlashPid(), SIGKILL);
-
-                reset();
-                stop_heartbeat(); // gracefully wind down current thread
-
-                // Set flag to restore visability after we relaunch
-                m_need_restore_visibility = true;
-
-                // create a fresh ipc object; a new thread will be spun when
-                // ensure_browser_ipc_connected() is called later.
-                m_browser_ipc.reset(new SockIpc());
-
-                // spawn a detached helper to launch browser so we don't block
-                std::thread([this]() {
-                    LaunchBrowser();
-                }).detach();
-
-                // break out of loop since we stopped heartbeat
-                break;
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-}
 
 bool BotClient::SendBrowserCommand(const std::string &message)
 {
@@ -1037,7 +898,6 @@ bool BotClient::SendBrowserCommand(const std::string &message)
         {
             utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
             // try reconnect
-            // stop_heartbeat();
             m_browser_ipc.reset(new SockIpc());
             if (!ensure_browser_ipc_connected())
             {
