@@ -36,7 +36,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_createWindow
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setSize
   (JNIEnv *, jobject, jint jw, jint jh)
 {
-    client.SendBrowserCommand(utils::format("setSize|{}|{}", jw, jh));
+    client.SendBrowserCommand("setSize", {{"w", std::to_string(jw)}, {"h", std::to_string(jh)}});
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setVisible

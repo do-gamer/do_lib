@@ -2,6 +2,8 @@
 #define BOT_CLIENT_H
 #include <memory>
 #include <mutex>
+#include <map>
+#include <string>
 #include "proc_util.h"
 
 class SockIpc;
@@ -29,7 +31,7 @@ public:
 
     bool IsValid();
 
-    bool SendBrowserCommand(const std::string &s);
+    bool SendBrowserCommand(const std::string &cmd, const std::map<std::string, std::string>& params = {});
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash

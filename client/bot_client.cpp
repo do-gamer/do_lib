@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <chrono>
@@ -872,8 +873,24 @@ bool BotClient::ensure_browser_ipc_connected()
     return true;
 }
 
+static std::string build_browser_command_json(const std::string& cmd, const std::map<std::string, std::string>& params)
+{
+    std::string json = R"({"cmd":")" + cmd + R"(")";
+    if (!params.empty())
+    {
+        json += ",";
+        for (auto it = params.begin(); it != params.end(); ++it)
+        {
+            json += "\"" + it->first + "\":" + it->second;
+            if (std::next(it) != params.end())
+                json += ",";
+        }
+    }
+    json += "}";
+    return json;
+}
 
-bool BotClient::SendBrowserCommand(const std::string &message)
+bool BotClient::SendBrowserCommand(const std::string &cmd, const std::map<std::string, std::string> &params)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
@@ -888,13 +905,14 @@ bool BotClient::SendBrowserCommand(const std::string &message)
         return false;
     }
 
-    std::string expected_ack = message + "|ok";
+    std::string json = build_browser_command_json(cmd, params);
+    std::string expected_ack = json + "|ok"; // the JS side appends "|ok" to acknowledge receipt and processing
     int maxAttempts = 3;
     std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
 
     for (int attempt = 1; attempt <= maxAttempts; ++attempt)
     {
-        if (!m_browser_ipc->Send(message))
+        if (!m_browser_ipc->Send(json.c_str()))
         {
             utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
             // try reconnect
@@ -921,10 +939,10 @@ bool BotClient::SendBrowserCommand(const std::string &message)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", message, attempt, maxAttempts);
+        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", json.c_str(), attempt, maxAttempts);
     }
 
-    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", message);
+    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", json.c_str());
     return false;
 }
 
@@ -1146,23 +1164,23 @@ void BotClient::KeyClick(uint32_t key)
     if (!SendFlashCommand(&message))
     {
         // if flash IPC failed, fall back to sending command to browser
-        SendBrowserCommand(utils::format("keyClick|{}", key));
+        SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
     }
 }
 
 void BotClient::KeyDown(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyDown|{}", key));
+    SendBrowserCommand("keyDown", {{"key", std::to_string(key)}});
 }
 
 void BotClient::KeyUp(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyUp|{}", key));
+    SendBrowserCommand("keyUp", {{"key", std::to_string(key)}});
 }
 
 void BotClient::SendText(const std::string &text)
 {
-    SendBrowserCommand(utils::format("text|{}", text));
+    SendBrowserCommand("text", {{"str", utils::escape_json(text)}});
     // small delay to allow browser to process text input
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }

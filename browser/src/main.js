@@ -12,52 +12,43 @@ const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./ke
 var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
-    sock.on('data', (msg) => {
+    sock.on('data', (data) => {
         if (!mainWindow) {
-            confirm.log("[browser] Received message but mainWindow is not initialized, ignoring");
+            console.log("[browser] Received command but mainWindow is not initialized, ignoring");
             return;
         }
 
-        switch (msg) {
-            case "refresh":
-                console.log("[browser] Received refresh command, reloading...");
-                mainWindow.reload();
-                break;
-            default:
-                let args = msg.split("|");
-                if (args.length < 2) {
-                    return;
-                }
-
-                switch (args[0]) {
-                    case "setSize":
-                        // resize the browser window to the given width and height
-                        if (args.length == 3) {
-                            let w = parseInt(args[1]);
-                            let h = parseInt(args[2]);
-                            if (!isNaN(w) && !isNaN(h)) {
-                                mainWindow.setSize(w, h);
-                            }
-                        }
-                        break;
-                    case "keyClick":
-                        handleKeyClick(mainWindow.webContents, args[1]);
-                        break;
-                    case "keyDown":
-                        handleKeyDown(mainWindow.webContents, args[1]);
-                        break;
-                    case "keyUp":
-                        handleKeyUp(mainWindow.webContents, args[1]);
-                        break;
-                    case "text":
-                        handleText(mainWindow.webContents, args[1]);
-                        break;
-                }
+        try {
+            const obj = JSON.parse(data);
+            switch (obj.cmd) {
+                case "refresh":
+                    console.log("[browser] Received refresh command, reloading...");
+                    mainWindow.reload();
+                    break;
+                case "setSize":
+                    // resize the browser window to the given width and height
+                    mainWindow.setSize(obj.w, obj.h);
+                    break;
+                case "keyClick":
+                    handleKeyClick(mainWindow.webContents, obj.key);
+                    break;
+                case "keyDown":
+                    handleKeyDown(mainWindow.webContents, obj.key);
+                    break;
+                case "keyUp":
+                    handleKeyUp(mainWindow.webContents, obj.key);
+                    break;
+                case "text":
+                    handleText(mainWindow.webContents, obj.str);
+                    break;
+            }
+        } catch (e) {
+            console.log("[browser] Failed to parse command:", data, e);
+            return;
         }
 
-        // Send an acknowledgement back to the sender that 
-        // the message was received and processed successfully.
-        sock.write(msg + "|ok");
+        // Send acknowledgment back to the sender.
+        sock.write(data + "|ok");
     });
 
     sock.on('error', (err) => {

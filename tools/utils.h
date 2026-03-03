@@ -97,6 +97,23 @@ namespace utils
         log(formatted.c_str());
     }
 
+    static inline std::string escape_json(const std::string& s)
+    {
+        std::string res = "\"";
+        for (char c : s) {
+            if (c == '"') res += "\\\"";
+            else if (c == '\\') res += "\\\\";
+            else if (c == '\n') res += "\\n";
+            else if (c == '\r') res += "\\r";
+            else if (c == '\t') res += "\\t";
+            else if (c == '\b') res += "\\b";
+            else if (c == '\f') res += "\\f";
+            else res += c;
+        }
+        res += "\"";
+        return res;
+    }
+
     class vec2
     {
     public:
