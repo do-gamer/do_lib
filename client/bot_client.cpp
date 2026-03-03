@@ -890,6 +890,10 @@ static std::string build_browser_command_json(const std::string& cmd, const std:
     return json;
 }
 
+/**
+ * Sends a command to the browser process via IPC, with retries and acknowledgment handling.
+ * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
+ */
 bool BotClient::SendBrowserCommand(const std::string &cmd, const std::map<std::string, std::string> &params)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
