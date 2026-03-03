@@ -12,13 +12,7 @@ const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./ke
 var server = net.createServer(function (sock) {
     sock.setEncoding('utf8');
 
-    sock.on('data', (data) => {
-        // strip any trailing newline, whitespace
-        let msg = data.trim();
-        if (msg === '') {
-            confirm.log("[browser] Received empty message, ignoring");
-            return;
-        }
+    sock.on('data', (msg) => {
         if (!mainWindow) {
             confirm.log("[browser] Received message but mainWindow is not initialized, ignoring");
             return;

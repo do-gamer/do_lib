@@ -138,9 +138,7 @@ function handleKeyUp(webContents, code) {
  * Simulates typing a string of text by sending individual character events with a small delay between them.
  */
 function handleText(webContents, text) {
-    if (!webContents.isFocused()) {
-        webContents.focus();
-    }
+    webContents.focus();
 
     let delay = 0;
     for (const ch of text) {

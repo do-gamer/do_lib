@@ -44,6 +44,7 @@ public:
     void KeyUp(uint32_t key);
     void SendText(const std::string &text);
     void MouseClick(int32_t x, int32_t y);
+    void MouseClickLegacy(int32_t x, int32_t y);
     void MouseMove(int32_t x, int32_t y);
     void MouseDown(int32_t x, int32_t y);
     void MouseUp(int32_t x, int32_t y);

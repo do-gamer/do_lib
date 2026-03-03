@@ -1167,21 +1167,33 @@ void BotClient::SendText(const std::string &text)
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
-void BotClient::MouseClick(int32_t x, int32_t y)
+/**
+ * Sends a mouse click event to the flash process via shared memory and semaphores,
+ * using the legacy method when X11 control is unavailable.
+ * 
+ * Note: may not work properly for some game actions.
+ */
+void BotClient::MouseClickLegacy(int32_t x, int32_t y)
 {
-    // First try flash IPC for better reliability
     Message message;
     message.type = MessageType::MOUSE_CLICK;
     message.click.x = x;
     message.click.y = y;
     message.click.button = 1;
+    SendFlashCommand(&message);
+}
 
-    if (!SendFlashCommand(&message))
+void BotClient::MouseClick(int32_t x, int32_t y)
+{
+    if (window::x11_control_available())
     {
-        // if flash IPC failed, fall back to sending native X11 event
         window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
             mouse::send_button(display, browser, x, y, Button1, true, true);
         });
+    }
+    else
+    {
+        MouseClickLegacy(x, y);
     }
     UpdateCursorMarker(x, y);
 }
