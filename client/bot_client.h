@@ -2,8 +2,6 @@
 #define BOT_CLIENT_H
 #include <memory>
 #include <mutex>
-#include <thread>
-#include <chrono>
 #include "proc_util.h"
 
 class SockIpc;
@@ -31,10 +29,11 @@ public:
 
     bool IsValid();
 
-    void SendBrowserCommand(const std::string &&s);
+    bool SendBrowserCommand(const std::string &s);
     void ToggleBrowserVisibility(bool visible);
 
-    void SendFlashCommand(Message *message, Message *response = nullptr);
+    // returns true if the command was successfully processed by flash
+    bool SendFlashCommand(Message *message, Message *response = nullptr);
 
     bool RefineOre(uintptr_t refine_util, uint32_t ore, uint32_t amount);
     bool SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args);
@@ -126,34 +125,14 @@ private:
 
     int m_browser_pid = -1, m_flash_pid = -1;
 
-    // remember desired browser visibility so we can restore after restart
-    bool m_browser_visible = true;
-    bool m_need_restore_visibility = false;
-
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
-
-    // heartbeat bookkeeping for the Electron IPC link
-    bool m_heartbeat_running = false;
-    std::chrono::steady_clock::time_point m_last_pong;
-    std::mutex m_heartbeat_mutex;
-
-    std::string normalized_sid() const;
-    bool is_valid_browser_process(int pid, const char *source = nullptr) const;
 
     bool find_flash_process();
     void reset();
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();
-
-    // utilities for managing browser visibility state
-    void restore_browser_visibility_if_needed();
-
-    // heartbeat helpers
-    void start_heartbeat();
-    void stop_heartbeat();
-    void heartbeat_loop();
 };
 
 

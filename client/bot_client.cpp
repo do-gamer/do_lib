@@ -649,6 +649,8 @@ enum class MessageType
     REFINE,
     UPGRADE,
     USE_ITEM,
+    KEY_CLICK,
+    MOUSE_CLICK,
     CHECK_SIGNATURE,
 
     NONE
@@ -699,6 +701,20 @@ struct UseItemMessage
 
 };
 
+struct KeyClickMessage
+{
+    MessageType type = MessageType::KEY_CLICK;
+    uint32_t key;
+};
+
+struct MouseClickMessage
+{
+    MessageType type = MessageType::MOUSE_CLICK;
+    uint32_t button;
+    int32_t x;
+    int32_t y;
+};
+
 struct GetSignatureMessage
 {
     MessageType type = MessageType::CHECK_SIGNATURE;;
@@ -719,22 +735,15 @@ union Message
     SendNotificationMessage notify;
     RefineMessage refine;
     UseItemMessage item;
+    KeyClickMessage key;
+    MouseClickMessage click;
     GetSignatureMessage sig;
 };
 
-
-BotClient::BotClient() :
-    m_browser_ipc(new SockIpc())
-{
-    // ensure heartbeat state starts clean
-    m_heartbeat_running = false;
-}
+BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    // store the last requested state
-    m_browser_visible = visible;
-
     window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
         visible ? XMapWindow(display, browser) : XUnmapWindow(display, browser);
     });
@@ -742,9 +751,6 @@ void BotClient::ToggleBrowserVisibility(bool visible)
 
 BotClient::~BotClient()
 {
-    // stop the heartbeat thread before tearing down
-    stop_heartbeat();
-
     if (Pid() > 0)
     {
         kill(Pid(), SIGKILL);
@@ -757,24 +763,23 @@ void sigchld_handler(int signal)
     waitpid(0, &status, WNOHANG);
 }
 
+
 void BotClient::Refresh()
 {
-    utils::log("[BotClient::Refresh] Triggering browser refresh\n");
+    utils::log("[Refresh] Triggering browser refresh\n");
 
-    if (!ensure_browser_ipc_connected() || !m_browser_ipc->Send("refresh"))
+    if (!SendBrowserCommand("refresh"))
     {
-        utils::log("[BotClient::Refresh] refresh command failed\n");
-        // reset IPC state so future commands will reconnect.
-        stop_heartbeat();
+        utils::log("[Refresh] refresh command failed\n");
+        // Reset IPC so we can attempt to reconnect
         m_browser_ipc.reset(new SockIpc());
         return;
     }
 
     // if there's an existing flash process, kill it so we don't keep
     // reusing the same PID after a refresh.
-    if (FlashPid() > 0) {
+    if (FlashPid() > 0)
         kill(FlashPid(), SIGKILL);
-    }
 
     reset();
 }
@@ -788,9 +793,6 @@ void BotClient::LaunchBrowser()
         fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
         return;
     }
-
-    // Set flag to restore visability if needed
-    m_need_restore_visibility = true;
 
     int pid = fork();
 
@@ -867,149 +869,63 @@ bool BotClient::ensure_browser_ipc_connected()
         printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
         return false;
     }
-
-    // once we have a fresh connection, start heartbeat monitoring
-    start_heartbeat();
-    // and restore browser visibility if needed
-    restore_browser_visibility_if_needed();
     return true;
 }
 
 
-// helper for browser visibility restoration
-void BotClient::restore_browser_visibility_if_needed()
-{
-    if (m_need_restore_visibility)
-    {
-        ToggleBrowserVisibility(m_browser_visible);
-        m_need_restore_visibility = false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// heartbeat helpers
-
-void BotClient::start_heartbeat()
-{
-    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-    if (m_heartbeat_running)
-        return;
-
-    m_last_pong = std::chrono::steady_clock::now();
-    m_heartbeat_running = true;
-    // create a detached worker thread; it will exit when m_heartbeat_running
-    // is cleared and the loop returns.
-    std::thread(&BotClient::heartbeat_loop, this).detach();
-}
-
-void BotClient::stop_heartbeat()
-{
-    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-    m_heartbeat_running = false;
-}
-
-void BotClient::heartbeat_loop()
-{
-    while (true)
-    {
-        {
-            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-            if (!m_heartbeat_running)
-                break;
-        }
-
-        // if we lost the ipc connection try to re-establish it
-        if (m_browser_ipc && !m_browser_ipc->Connected() && Pid() >= 0)
-        {
-            ensure_browser_ipc_connected();
-        }
-
-        if (m_browser_ipc && m_browser_ipc->Connected())
-        {
-            m_browser_ipc->Send("ping");
-
-            std::string msg;
-            if (m_browser_ipc->Recv(msg))
-            {
-                if (msg.find("pong") != std::string::npos)
-                {
-                    std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-                    m_last_pong = std::chrono::steady_clock::now();
-                }
-            }
-        }
-
-        // check timeout/heartbeat failure
-        {
-            std::lock_guard<std::mutex> lk(m_heartbeat_mutex);
-            if (m_last_pong.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_last_pong > std::chrono::seconds(5))
-            {
-                utils::log("[BotClient::heartbeat] no pong received, restarting browser\n");
-
-                // kill existing processes & reset state
-                if (Pid() > 0)
-                    kill(Pid(), SIGKILL);
-                if (FlashPid() > 0)
-                    kill(FlashPid(), SIGKILL);
-                reset();
-                stop_heartbeat(); // gracefully wind down current thread
-
-                // create a fresh ipc object; a new thread will be spun when
-                // ensure_browser_ipc_connected() is called later.
-                m_browser_ipc.reset(new SockIpc());
-
-                // spawn a detached helper to launch browser so we don't block
-                std::thread([this]() {
-                    LaunchBrowser();
-                }).detach();
-
-                // break out of loop since we stopped heartbeat
-                break;
-            }
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-    }
-}
-
-void BotClient::SendBrowserCommand(const std::string &&message)
+bool BotClient::SendBrowserCommand(const std::string &message)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
-        return;
+        return false;
     }
 
     if (!ensure_browser_ipc_connected())
     {
-        return;
+        return false;
     }
 
-    //printf("[SendBrowserCommand] Sending message %s\n", message.c_str());
+    std::string expected_ack = message + "|ok";
+    int maxAttempts = 3;
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
 
-    // attempt to send the message.  if we get a failure then we assume the
-    // browser side is no longer responding; try a single reconnect.
-    if (!m_browser_ipc->Send(message))
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
     {
-        fprintf(stderr, "[SendBrowserCommand] send failed, reconnecting\n");
-        stop_heartbeat();
-        m_browser_ipc.reset(new SockIpc());
-        if (ensure_browser_ipc_connected())
+        if (!m_browser_ipc->Send(message))
         {
-            if (!m_browser_ipc->Send(message))
+            utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
+            // try reconnect
+            m_browser_ipc.reset(new SockIpc());
+            if (!ensure_browser_ipc_connected())
             {
-                fprintf(stderr, "[SendBrowserCommand] send failed after reconnect\n");
+                utils::log("[SendBrowserCommand] reconnect attempt failed\n");
+                return false;
             }
+            continue; // retry send
         }
-        else
+
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
         {
-            fprintf(stderr, "[SendBrowserCommand] reconnect attempt failed\n");
+            std::string reply;
+            if (m_browser_ipc->Recv(reply))
+            {
+                if (reply.find(expected_ack) != std::string::npos)
+                {
+                    return true; // success
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+
+        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", message, attempt, maxAttempts);
     }
-    return;
+
+    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", message);
+    return false;
 }
 
 bool BotClient::find_flash_process()
@@ -1082,17 +998,20 @@ bool BotClient::IsValid()
     return true;
 }
 
-void BotClient::SendFlashCommand(Message *message, Message *response)
+/**
+ * Sends a command message to the flash process via shared memory and semaphores, and optionally waits for a response.
+ */
+bool BotClient::SendFlashCommand(Message *message, Message *response)
 {
     if (!IsValid())
     {
-        return;
+        return false;
     }
 
     if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
         fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
-        return;
+        return false;
     }
 
     if (!m_shared_mem_flash || m_shared_mem_flash == (void *)-1)
@@ -1100,7 +1019,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to attach shared memory to our process\n");
-            return;
+            return false;
         }
     }
 
@@ -1110,7 +1029,7 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         {
             SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
-            return;
+            return false;
         }
     }
 
@@ -1120,34 +1039,42 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     static timespec timeout { .tv_sec = 1, .tv_nsec = 0 };
     sembuf sop[2] { { 0, -1, 0 }, { 1, 0, 0 } };
 
+    bool success = true;
+
     // Notify
     if (semtimedop(m_flash_sem, &sop[0], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
-            return;
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+        }
+        success = false;
     }
 
     // Wait
-    if (semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
+    if (success && semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
-            return;
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+        }
+        success = false;
     }
 
-    if (response)
+    if (response && success)
     {
         memcpy(response, m_shared_mem_flash, sizeof(Message));
     }
+
+    return success;
 }
 
 bool BotClient::SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args)
@@ -1211,7 +1138,16 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 
 void BotClient::KeyClick(uint32_t key)
 {
-    SendBrowserCommand(utils::format("keyClick|{}", key));
+    // First try flash IPC for better reliability
+    Message message;
+    message.type = MessageType::KEY_CLICK;
+    message.key.key = key;
+
+    if (!SendFlashCommand(&message))
+    {
+        // if flash IPC failed, fall back to sending command to browser
+        SendBrowserCommand(utils::format("keyClick|{}", key));
+    }
 }
 
 void BotClient::KeyDown(uint32_t key)
@@ -1233,9 +1169,20 @@ void BotClient::SendText(const std::string &text)
 
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
-    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        mouse::send_button(display, browser, x, y, Button1, true, true);
-    });
+    // First try flash IPC for better reliability
+    Message message;
+    message.type = MessageType::MOUSE_CLICK;
+    message.click.x = x;
+    message.click.y = y;
+    message.click.button = 1;
+
+    if (!SendFlashCommand(&message))
+    {
+        // if flash IPC failed, fall back to sending native X11 event
+        window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+            mouse::send_button(display, browser, x, y, Button1, true, true);
+        });
+    }
     UpdateCursorMarker(x, y);
 }
 

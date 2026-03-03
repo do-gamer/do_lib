@@ -25,21 +25,16 @@ var server = net.createServer(function (sock) {
         }
 
         switch (msg) {
-            case "ping":
-                // respond to heartbeat ping directly
-                sock.write('pong');
-                return;
             case "refresh":
                 console.log("[browser] Received refresh command, reloading...");
                 mainWindow.reload();
-                return;
+                break;
             default:
                 let args = msg.split("|");
                 if (args.length < 2) {
                     return;
                 }
 
-                // handle events
                 switch (args[0]) {
                     case "setSize":
                         // resize the browser window to the given width and height
@@ -50,21 +45,25 @@ var server = net.createServer(function (sock) {
                                 mainWindow.setSize(w, h);
                             }
                         }
-                        return;
+                        break;
                     case "keyClick":
                         handleKeyClick(mainWindow.webContents, args[1]);
-                        return;
+                        break;
                     case "keyDown":
                         handleKeyDown(mainWindow.webContents, args[1]);
-                        return;
+                        break;
                     case "keyUp":
                         handleKeyUp(mainWindow.webContents, args[1]);
-                        return;
+                        break;
                     case "text":
                         handleText(mainWindow.webContents, args[1]);
-                        return;
+                        break;
                 }
         }
+
+        // Send an acknowledgement back to the sender that 
+        // the message was received and processed successfully.
+        sock.write(msg + "|ok");
     });
 
     sock.on('error', (err) => {
@@ -77,9 +76,6 @@ var server = net.createServer(function (sock) {
         // a new connection event when that happens.  nothing to do here other
         // than logging/debugging.
     });
-
-    // echo data back to the client to keep the stream alive (legacy behaviour)
-    sock.pipe(sock);
 });
 server.listen("/tmp/darkbot_ipc_" + process.pid);
 
