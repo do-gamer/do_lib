@@ -1181,11 +1181,7 @@ void BotClient::KeyUp(uint32_t key)
 
 void BotClient::SendText(const std::string &text)
 {
-    bool success = SendBrowserCommand("text", {{"text", utils::escape_json(text)}});
-
-    // small delay to allow browser to process text input
-    if (success)
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    SendBrowserCommand("text", {{"text", utils::escape_json(text)}});
 }
 
 /**
@@ -1320,6 +1316,60 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
                 // unsupported message, ignore
                 break;
         }
+    }
+}
+
+// paste a string to the game, optionally performing native actions before/after
+void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &actions)
+{
+    // split inline vector into before/after lists using high-bit flag
+    const uint64_t AFTER_MASK = (1ULL << 63);
+    std::vector<uint64_t> before;
+    std::vector<uint64_t> after;
+    for (uint64_t v : actions) {
+        if (v & AFTER_MASK)
+            after.push_back(v);
+        else
+            before.push_back(v);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_paste_mutex);
+        m_paste_queue.push({before, text, after});
+    }
+
+    // start worker thread once
+    if (!m_paste_worker_running.exchange(true)) {
+        std::thread([this]() {
+            while (true) {
+                std::tuple<std::vector<uint64_t>, std::string, std::vector<uint64_t>> item;
+                {
+                    std::lock_guard<std::mutex> lock(m_paste_mutex);
+                    if (m_paste_queue.empty())
+                        break;
+                    item = m_paste_queue.front();
+                    m_paste_queue.pop();
+                }
+
+                auto &[before_actions, str, after_actions] = item;
+
+                if (!before_actions.empty())
+                {
+                    PostActions(before_actions);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+
+                SendText(str);
+                std::this_thread::sleep_for(std::chrono::milliseconds(750));
+
+                if (!after_actions.empty())
+                {
+                    PostActions(after_actions);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            }
+            m_paste_worker_running = false;
+        }).detach();
     }
 }
 

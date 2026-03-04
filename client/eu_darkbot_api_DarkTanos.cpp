@@ -3,9 +3,6 @@
 #include <unistd.h>
 #include <cstring>
 #include <vector>
-#include <mutex>
-#include <chrono>
-#include <thread>
 
 #include "bot_client.h"
 #include "utils.h"
@@ -114,30 +111,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_pasteText
         }
     }
 
-    // split inline: before (no after flag) and after (has after flag)
-    const uint64_t AFTER_MASK = (1ULL << 63);
-    std::vector<uint64_t> before;
-    std::vector<uint64_t> after;
-    for (uint64_t v : actions) {
-        if (v & AFTER_MASK)
-            after.push_back(v);
-        else
-            before.push_back(v);
-    }
-
-    // execute before actions
-    if (!before.empty()) {
-        client.PostActions(before);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // small delay
-    }
-
-    // send text
-    client.SendText(text);
-
-    // execute after actions
-    if (!after.empty()) {
-        client.PostActions(after);
-    }
+    client.PasteText(text, actions);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove

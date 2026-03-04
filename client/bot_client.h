@@ -4,6 +4,9 @@
 #include <mutex>
 #include <map>
 #include <string>
+#include <queue>
+#include <tuple>
+#include <atomic>
 #include "proc_util.h"
 
 class SockIpc;
@@ -55,6 +58,9 @@ public:
 
     // batch processing of native actions coming from the Java layer
     void PostActions(const std::vector<uint64_t> &actions);
+
+    // paste text with optional before/after actions; thread‑safe queuing
+    void PasteText(const std::string &text, const std::vector<uint64_t> &actions);
 
     // testing helper - show a red dot at the virtual cursor position
     void EnableCursorMarker(bool enable);
@@ -130,6 +136,11 @@ private:
 
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
+
+    // queue used by PasteText
+    std::mutex m_paste_mutex;
+    std::queue<std::tuple<std::vector<uint64_t>, std::string, std::vector<uint64_t>>> m_paste_queue;
+    std::atomic<bool> m_paste_worker_running{false};
 
     bool find_flash_process();
     void reset();
