@@ -873,15 +873,17 @@ bool BotClient::ensure_browser_ipc_connected()
 
 static std::string build_browser_command_json(const std::string& cmd, const std::map<std::string, std::string>& params)
 {
+    // attach current time (milliseconds since epoch) to message
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
     std::string json = R"({"cmd":")" + cmd + R"(")";
+    json += R"(,"ts":)" + std::to_string(ms);
     if (!params.empty())
     {
-        json += ",";
         for (auto it = params.begin(); it != params.end(); ++it)
         {
-            json += "\"" + it->first + "\":" + it->second;
-            if (std::next(it) != params.end())
-                json += ",";
+            json += R"(,")" + it->first + R"(":)" + it->second;
         }
     }
     json += "}";
