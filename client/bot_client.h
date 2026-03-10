@@ -2,8 +2,9 @@
 #define BOT_CLIENT_H
 #include <memory>
 #include <mutex>
-#include <map>
+#include <initializer_list>
 #include <string>
+#include <string_view>
 #include <queue>
 #include <tuple>
 #include <atomic>
@@ -11,6 +12,12 @@
 
 class SockIpc;
 union Message;
+
+struct JsonParam
+{
+    const char *key;
+    std::string_view value;
+};
 
 class BotClient
 {
@@ -34,7 +41,7 @@ public:
 
     bool IsValid();
 
-    bool SendBrowserCommand(const std::string &cmd, const std::map<std::string, std::string>& params = {});
+    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {});
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash

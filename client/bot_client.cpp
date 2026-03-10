@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
-#include <map>
+#include <charconv>
 #include <mutex>
 #include <thread>
 #include <chrono>
@@ -871,22 +871,43 @@ bool BotClient::ensure_browser_ipc_connected()
     return true;
 }
 
-static std::string build_browser_command_json(const std::string& cmd, const std::map<std::string, std::string>& params)
+/**
+ * Builds a JSON string for the given command and parameters, including a timestamp for uniqueness.
+ */
+static std::string build_browser_command_json(const std::string &cmd, std::initializer_list<JsonParam> params)
 {
-    // attach current time (milliseconds since epoch) to message
     auto now = std::chrono::system_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
-    std::string json = R"({"cmd":")" + cmd + R"(")";
-    json += R"(,"ts":)" + std::to_string(ms);
-    if (!params.empty())
+    char ts_buf[32];
+    auto [ts_ptr, ts_ec] = std::to_chars(ts_buf, ts_buf + sizeof(ts_buf), ms);
+    if (ts_ec != std::errc())
     {
-        for (auto it = params.begin(); it != params.end(); ++it)
-        {
-            json += R"(,")" + it->first + R"(":)" + it->second;
-        }
+        ts_ptr = ts_buf;
     }
-    json += "}";
+
+    size_t reserve_size = cmd.size() + static_cast<size_t>(ts_ptr - ts_buf) + 16;
+    for (const JsonParam &param : params)
+    {
+        reserve_size += 4 + std::strlen(param.key) + param.value.size();
+    }
+
+    std::string json;
+    json.reserve(reserve_size);
+    json.append("{\"cmd\":\"");
+    json.append(cmd);
+    json.append("\",\"ts\":");
+    json.append(ts_buf, static_cast<size_t>(ts_ptr - ts_buf));
+
+    for (const JsonParam &param : params)
+    {
+        json.append(",\"");
+        json.append(param.key);
+        json.append("\":");
+        json.append(param.value.data(), param.value.size());
+    }
+
+    json.push_back('}');
     return json;
 }
 
@@ -894,7 +915,7 @@ static std::string build_browser_command_json(const std::string& cmd, const std:
  * Sends a command to the browser process via IPC, with retries and acknowledgment handling.
  * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
  */
-bool BotClient::SendBrowserCommand(const std::string &cmd, const std::map<std::string, std::string> &params)
+bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params)
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
@@ -910,7 +931,10 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, const std::map<std::s
     }
 
     std::string json = build_browser_command_json(cmd, params);
-    std::string expected_ack = json + "|ok"; // the JS side appends "|ok" to acknowledge receipt and processing
+    std::string expected_ack;
+    expected_ack.reserve(json.size() + 3);
+    expected_ack.append(json);
+    expected_ack.append("|ok"); // the JS side appends "|ok" to acknowledge receipt and processing
     int maxAttempts = 3;
     std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
 
