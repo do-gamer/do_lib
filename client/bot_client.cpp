@@ -504,6 +504,7 @@ namespace cursor_marker
         bool enabled = false;
         Display *display = nullptr;
         Window window = 0;
+        Window parent = 0;
         std::chrono::steady_clock::time_point last_time;
         std::mutex mutex;
     };
@@ -511,17 +512,36 @@ namespace cursor_marker
     static State state;
 
     /**
+     * Destroys the cursor marker window and closes the display connection.
+     */
+    void destroy()
+    {
+        if (state.window && state.display)
+        {
+            XDestroyWindow(state.display, state.window);
+            XCloseDisplay(state.display);
+        }
+        state.window = 0;
+        state.parent = 0;
+        state.display = nullptr;
+    }
+
+    /**
      * Creates a small red window that will serve as a marker for the virtual cursor position.
      * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
      */
-    void create()
+    void create(Window parent)
     {
+        if (!parent)
+            return;
+
+        destroy();
+
         state.display = XOpenDisplay(NULL);
         if (!state.display)
             return;
 
         int scr = DefaultScreen(state.display);
-        Window root = RootWindow(state.display, scr);
 
         Colormap cmap = DefaultColormap(state.display, scr);
         XColor color;
@@ -532,22 +552,22 @@ namespace cursor_marker
         }
 
         XSetWindowAttributes attr;
-        attr.override_redirect = True;
         attr.background_pixel = color.pixel;
         attr.background_pixmap = None;
 
-        unsigned long mask = CWOverrideRedirect | CWBackPixel;
+        unsigned long mask = CWBackPixel;
         state.window = XCreateWindow(
             state.display,
-            root,
+            parent,
             0, 0, dot_size, dot_size, 0,
             CopyFromParent,
             InputOutput,
             CopyFromParent,
             mask,
             &attr);
+        state.parent = parent;
 
-        // make the window input‑transparent so it doesn't grab events
+        // make the window input-transparent so it doesn't grab events
         int shape_event, shape_error;
         if (XShapeQueryExtension(state.display, &shape_event, &shape_error))
         {
@@ -564,20 +584,6 @@ namespace cursor_marker
 
         XMapRaised(state.display, state.window);
         XFlush(state.display);
-    }
-
-    /**
-     * Destroys the cursor marker window and closes the display connection.
-     */
-    void destroy()
-    {
-        if (state.window && state.display)
-        {
-            XDestroyWindow(state.display, state.window);
-            XCloseDisplay(state.display);
-        }
-        state.window = 0;
-        state.display = nullptr;
     }
 
     /**
@@ -610,25 +616,19 @@ namespace cursor_marker
             state.last_time = std::chrono::steady_clock::now();
         }
 
-        if (!state.window)
-            create();
+        window::with_browser(flash_pid, browser_pid, [&](Display *display, Window browser) {
+            if (!state.window || !state.display || state.parent != browser || !window::try_get_attrs(state.display, state.window))
+                create(browser);
 
-        if (state.window && state.display)
-        {
-            // translate coordinates from browser window space to root (screen) space
-            window::with_browser(flash_pid, browser_pid, [&](Display *display, Window browser) {
-                Window root = DefaultRootWindow(display);
-                int root_x = 0, root_y = 0;
-                Window child = 0;
-                XTranslateCoordinates(display, browser, root, x, y, &root_x, &root_y, &child);
+            if (!state.window || !state.display)
+                return false;
 
-                // move marker on its own display (should be same as 'display' but we stored earlier when created)
-                const int offset = static_cast<int>(std::lround(dot_size / 2.0));
-                XMoveWindow(state.display, state.window, root_x - offset, root_y - offset);
-                XFlush(state.display);
-                return true;
-            });
-        }
+            const int offset = static_cast<int>(std::lround(dot_size / 2.0));
+            XMoveWindow(state.display, state.window, x - offset, y - offset);
+            XMapRaised(state.display, state.window);
+            XFlush(state.display);
+            return true;
+        });
 
         // schedule a hide check in 3 seconds
         std::thread([]() {
