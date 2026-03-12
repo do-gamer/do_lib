@@ -1183,8 +1183,9 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 }
 
 /**
- * Sends a key click event to the flash process via shared memory and semaphores,
- * using the legacy method when send command to browser is unavailable.
+ * Sends a key click event to the flash process via shared memory and semaphores.
+ *
+ * Note: works a bit better than sending command to the browser.
  */
 bool BotClient::KeyClickLegacy(uint32_t key)
 {
@@ -1196,12 +1197,12 @@ bool BotClient::KeyClickLegacy(uint32_t key)
 
 void BotClient::KeyClick(uint32_t key)
 {
-    // First attempt to send the key event to the browser
-    bool success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
+    // First try sending key click via legacy flash IPC method (works a bit better).
+    bool success = KeyClickLegacy(key);
 
-    // If browser command failed, fall back to the old flash IPC method
+    // If failed, then send via browser command
     if (!success)
-        success = KeyClickLegacy(key);
+        success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
 }
 
 void BotClient::KeyDown(uint32_t key)
