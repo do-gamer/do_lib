@@ -36,28 +36,43 @@ bool ProcUtil::IsChildOf(pid_t child_pid, pid_t test_parent)
     return false;
 }
 
-std::vector<int> ProcUtil::FindProcsByName(const std::string &pattern)
+// Concrete entry point; callers pass an initializer_list of patterns.
+std::vector<int> ProcUtil::FindProcsByName(const std::initializer_list<std::string> &patterns)
 {
     std::vector<int> result;
+
+    // nothing to search for
+    if (patterns.size() == 0)
+        return result;
+
     for (const auto &entry : std::filesystem::directory_iterator("/proc/"))
     {
         const std::string &path_name = entry.path().filename().string();
-
         pid_t pid = atoi(path_name.c_str());
 
         if (!entry.is_directory() || !pid)
             continue;
 
-        auto cmd_path = entry.path() / "cmdline";
-
-        if (std::ifstream cmdline_f { cmd_path.string(), std::ios::binary})
+        auto cmd_path = std::filesystem::path("/proc") / std::to_string(pid) / "cmdline";
+        std::ifstream cmdline_f { cmd_path.string(), std::ios::binary };
+        if (cmdline_f)
         {
             std::string contents((std::istreambuf_iterator<char>(cmdline_f)), std::istreambuf_iterator<char>());
-
-            std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
-
-            if (contents.find(pattern) != std::string::npos)
-                result.push_back(pid);
+            if (!contents.empty())
+            {
+                std::replace_if(contents.begin(), contents.end(), [] (char c) { return c == 0; }, ' ');
+                bool match = true;
+                for (const auto &pat : patterns)
+                {
+                    if (contents.find(pat) == std::string::npos)
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match)
+                    result.push_back(pid);
+            }
         }
     }
 

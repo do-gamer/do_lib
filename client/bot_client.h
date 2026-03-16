@@ -1,10 +1,23 @@
 #ifndef BOT_CLIENT_H
 #define BOT_CLIENT_H
 #include <memory>
+#include <mutex>
+#include <initializer_list>
+#include <string>
+#include <string_view>
+#include <queue>
+#include <tuple>
+#include <atomic>
 #include "proc_util.h"
 
 class SockIpc;
 union Message;
+
+struct JsonParam
+{
+    const char *key;
+    std::string_view value;
+};
 
 class BotClient
 {
@@ -18,27 +31,50 @@ public:
         m_url = url;
     }
 
+    void Refresh();
     void LaunchBrowser();
 
     void SetPid(int pid) { m_browser_pid = pid; }
+    void SetFlashPid(int pid) { m_flash_pid = pid; }
     inline int Pid() const { return m_browser_pid; }
     inline int FlashPid() const { return m_flash_pid; }
 
     bool IsValid();
 
-    void SendBrowserCommand(const std::string &&s, int sync);
+    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {});
     void ToggleBrowserVisibility(bool visible);
 
-    void SendFlashCommand(Message *message, Message *response = nullptr);
+    // returns true if the command was successfully processed by flash
+    bool SendFlashCommand(Message *message, Message *response = nullptr);
 
     bool RefineOre(uintptr_t refine_util, uint32_t ore, uint32_t amount);
     bool SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args);
     bool UseItem(const std::string &name, uint8_t type, uint8_t bar);
     uintptr_t CallMethod(uintptr_t obj, uint32_t index, const std::vector<uintptr_t> &args);
-    bool ClickKey(uint32_t key);
-    bool MouseClick(int32_t x, int32_t y, uint32_t button);
+    bool KeyClickLegacy(uint32_t key);
+    void KeyClick(uint32_t key);
+    void KeyDown(uint32_t key);
+    void KeyUp(uint32_t key);
+    void SendText(const std::string &text);
+    bool MouseClickLegacy(int32_t x, int32_t y);
+    void MouseClick(int32_t x, int32_t y);
+    void MouseMove(int32_t x, int32_t y);
+    void MouseDown(int32_t x, int32_t y);
+    void MouseUp(int32_t x, int32_t y);
+    void MouseScroll(int32_t x, int32_t y, int32_t delta);
     int CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig);
 
+    // batch processing of native actions coming from the Java layer
+    void PostActions(const std::vector<uint64_t> &actions);
+
+    // paste text with optional before/after actions; thread‑safe queuing
+    void PasteText(const std::string &text, const std::vector<uint64_t> &actions);
+
+    // testing helper - show a red dot at the virtual cursor position
+    void EnableCursorMarker(bool enable);
+    void UpdateCursorMarker(int32_t x, int32_t y);
+
+    // utility templates that are used by JNI wrapper; keep public so the JNI code can call them
     template <typename T>
     T Read(uintptr_t address, int *result = nullptr)
     {
@@ -93,7 +129,6 @@ public:
     }
 
 
-
 private:
     std::unique_ptr<SockIpc> m_browser_ipc;
     char *m_shared_mem = nullptr;
@@ -107,8 +142,19 @@ private:
 
     int m_browser_pid = -1, m_flash_pid = -1;
 
+    // protects PostActions from concurrent invocation
+    std::mutex m_post_actions_mutex;
+
+    // queue used by PasteText
+    std::mutex m_paste_mutex;
+    std::queue<std::tuple<std::vector<uint64_t>, std::string, std::vector<uint64_t>>> m_paste_queue;
+    std::atomic<bool> m_paste_worker_running{false};
+
     bool find_flash_process();
     void reset();
+
+    // helpers for browser IPC
+    bool ensure_browser_ipc_connected();
 };
 
 

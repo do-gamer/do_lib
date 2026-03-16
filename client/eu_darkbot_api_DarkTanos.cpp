@@ -2,6 +2,7 @@
 #include "eu_darkbot_api_DarkTanos.h"
 #include <unistd.h>
 #include <cstring>
+#include <vector>
 
 #include "bot_client.h"
 #include "utils.h"
@@ -32,7 +33,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_createWindow
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setSize
   (JNIEnv *, jobject, jint jw, jint jh)
 {
-    client.SendBrowserCommand(utils::format("setSize|{}|{}", jw, jh), 0);
+    client.SendBrowserCommand("setSize", {{"w", std::to_string(jw)}, {"h", std::to_string(jh)}});
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setVisible
@@ -52,7 +53,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setMinimized
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_reload
   (JNIEnv *, jobject)
 {
-    client.SendBrowserCommand("refresh", 1);
+    client.Refresh();
 }
 
 JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_isValid
@@ -80,8 +81,7 @@ JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_getVersion
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_keyClick
   (JNIEnv *, jobject, jint c)
 {
-    //client.SendBrowserCommand(utils::format("pressKey|{}", c), 1);
-    client.ClickKey(c);
+    client.KeyClick(c);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
@@ -90,32 +90,75 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
     const char *cstr = env->GetStringUTFChars(jtext, NULL);
     std::string text = cstr;
     env->ReleaseStringUTFChars(jtext, cstr);
-    client.SendBrowserCommand("text|" + text, 1);
+    client.SendText(text);
+}
+
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_pasteText
+  (JNIEnv *env, jobject, jstring jtext, jlongArray jactions)
+{
+    // convert string
+    const char *cstr = env->GetStringUTFChars(jtext, NULL);
+    std::string text = cstr;
+    env->ReleaseStringUTFChars(jtext, cstr);
+
+    // convert actions array
+    std::vector<uint64_t> actions;
+    if (jactions) {
+        jsize len = env->GetArrayLength(jactions);
+        if (len > 0) {
+            actions.resize(static_cast<size_t>(len));
+            env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
+        }
+    }
+
+    client.PasteText(text, actions);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mouseMove|{}|{}", x, y), 1);
+    client.MouseMove(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseDown
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mousePress|{}|{}", x, y), 1);
+    client.MouseDown(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseUp
   (JNIEnv *, jobject, jint x, jint y)
 {
-    client.SendBrowserCommand(utils::format("mouseRelease|{}|{}", x, y), 1);
+    client.MouseUp(x, y);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseClick
   (JNIEnv *, jobject, jint x, jint y)
 {
-    //client.SendBrowserCommand(utils::format("mouseClick|{}|{}", x, y), 1);
-    client.MouseClick(x, y, 1);
+    client.MouseClick(x, y);
+}
+
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setCursorMarker
+  (JNIEnv *, jobject, jboolean enable)
+{
+    // Show red dot at the cursor position (useful for debugging)
+    client.EnableCursorMarker(enable);
+}
+
+JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
+  (JNIEnv *env, jobject, jlongArray jactions)
+{
+    if (!jactions)
+        return;
+
+    jsize len = env->GetArrayLength(jactions);
+    if (len <= 0)
+        return;
+
+    std::vector<uint64_t> actions(static_cast<size_t>(len));
+    env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
+
+    client.PostActions(actions);
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_readInt

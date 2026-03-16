@@ -374,7 +374,7 @@ std::string Darkorbit::get_method_signature(avm::MethodInfo *mi, bool method_nam
 
 bool Darkorbit::install(uintptr_t main_app_address)
 {
-    mouse_click(0, 0, 1); // Mouse click to initialize the click param
+    mouse_click(0, 0, 1); // Mouse click to initialize the click param for flash IPC
 
     m_main            = memory::read<avm::ScriptObject *>(main_app_address + 0x540);
     m_screen_manager  = m_main->get_at<avm::ScriptObject *>(0x1f8);

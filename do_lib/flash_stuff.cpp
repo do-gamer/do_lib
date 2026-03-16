@@ -165,9 +165,9 @@ bool flash_stuff::install()
     newarray_f              = reinterpret_cast<newarray_t>(base + offsets::newarray);
     newstring_f             = reinterpret_cast<newstring_t>(base + offsets::newstring);
     finddef_f               = reinterpret_cast<finddef_t>(base + offsets::finddef);
-    mouse_release_f           = reinterpret_cast<mouse_release_t>(base + offsets::mouse_release);
+    mouse_release_f         = reinterpret_cast<mouse_release_t>(base + offsets::mouse_release);
     mouse_press_f           = reinterpret_cast<mouse_press_t>(base + offsets::mouse_press);
-    get_method_signature_f = reinterpret_cast<get_method_signature_t>(base + offsets::get_method_sig);
+    get_method_signature_f  = reinterpret_cast<get_method_signature_t>(base + offsets::get_method_sig);
 
     return true;
 }

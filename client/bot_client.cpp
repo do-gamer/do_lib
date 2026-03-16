@@ -2,6 +2,14 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cmath>
+#include <charconv>
+#include <mutex>
+#include <thread>
+#include <chrono>
+#include <unistd.h>
+#include <vector>
+#include <sstream>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -16,15 +24,70 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/X.h>
+#include <X11/extensions/shape.h>
 
 
 #define MEM_SIZE 1024
 
-namespace
+namespace window
 {
     Window browser_window = 0;
 
-    bool get_window_pid(Display *display, Window window, pid_t &pid)
+    struct Property
+    {
+        Atom actual_type = None;
+        int actual_format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *prop = nullptr;
+    };
+
+    /**
+     * Helper function to free the memory allocated by XGetWindowProperty and reset the WindowProperty structure.
+     */
+    void free_property(Property &property)
+    {
+        if (property.prop)
+        {
+            XFree(property.prop);
+        }
+        property.actual_type = None;
+        property.actual_format = 0;
+        property.nitems = 0;
+        property.bytes_after = 0;
+        property.prop = nullptr;
+    }
+
+    /**
+     * Helper function to get a window property with proper error handling and type checking.
+     */
+    bool get_property(Display *display,
+                      Window window,
+                      Atom property,
+                      Atom type,
+                      long length,
+                      Property &out)
+    {
+        if (!display || property == None)
+        {
+            return false;
+        }
+
+        int status = XGetWindowProperty(display, window, property, 0, length, False, type,
+                                        &out.actual_type,
+                                        &out.actual_format,
+                                        &out.nitems,
+                                        &out.bytes_after,
+                                        &out.prop);
+
+        return status == Success;
+    }
+
+    /**
+     * Helper function to get the PID of the process owning a window, using the _NET_WM_PID property.
+     */
+    bool get_pid(Display *display, Window window, pid_t &pid)
     {
         Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
         if (atom_pid == None)
@@ -32,52 +95,41 @@ namespace
             return false;
         }
 
-        Atom actual_type = None;
-        int actual_format = 0;
-        unsigned long nitems = 0;
-        unsigned long bytes_after = 0;
-        unsigned char *prop = nullptr;
+        Property property;
+        bool read_ok = get_property(display, window, atom_pid, XA_CARDINAL, 1, property);
 
-        int status = XGetWindowProperty(
-                display,
-                window,
-                atom_pid,
-                0,
-                1,
-                False,
-                XA_CARDINAL,
-                &actual_type,
-                &actual_format,
-                &nitems,
-                &bytes_after,
-                &prop);
-
-        if (status != Success || !prop || nitems == 0)
+        if (!read_ok || !property.prop || property.nitems == 0)
         {
-            if (prop)
-            {
-                XFree(prop);
-            }
+            free_property(property);
             return false;
         }
 
-        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(prop));
-        XFree(prop);
+        pid = static_cast<pid_t>(*reinterpret_cast<unsigned long *>(property.prop));
+        free_property(property);
         return true;
     }
 
-    bool is_browser_window_pid(pid_t owner_pid, pid_t browser_pid)
+    /**
+     * Helper function to check if a given PID is the browser process or a child of it.
+     */
+    bool is_browser_pid(pid_t owner_pid, pid_t browser_pid)
     {
         return owner_pid == browser_pid || ProcUtil::IsChildOf(owner_pid, browser_pid);
     }
 
-    bool x11_window_control_available()
+    /**
+     * Checks if X11 window control is available by verifying the DISPLAY environment variable.
+     */
+    bool x11_control_available()
     {
         const char *display = std::getenv("DISPLAY");
         return display && *display;
     }
 
-    bool try_get_window_attrs(Display *display, Window window)
+    /**
+     * Helper function to attempt to get window attributes, handling potential X11 errors gracefully.
+     */
+    bool try_get_attrs(Display *display, Window window)
     {
         XWindowAttributes attrs;
         if (XGetWindowAttributes(display, window, &attrs) != 0)
@@ -89,6 +141,10 @@ namespace
         return XGetWindowAttributes(display, window, &attrs) != 0;
     }
 
+    /**
+     * Helper function to find the top-level root child of a given window,
+     * which is likely the actual browser window we want to control.
+     */
     Window find_toplevel_root_child(Display *display, Window root, Window window)
     {
         if (!window)
@@ -125,6 +181,10 @@ namespace
         return window;
     }
 
+    /**
+     * Recursive helper function to find any descendant window owned by the browser process,
+     * in case the top-level window doesn't have a PID or isn't directly owned by the browser.
+     */
     Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid)
     {
         if (!root)
@@ -133,7 +193,7 @@ namespace
         }
 
         pid_t owner_pid = -1;
-        if (get_window_pid(display, root, owner_pid) && is_browser_window_pid(owner_pid, browser_pid))
+        if (get_pid(display, root, owner_pid) && is_browser_pid(owner_pid, browser_pid))
         {
             return root;
         }
@@ -161,47 +221,33 @@ namespace
         return found;
     }
 
-    Window find_browser_client_window(Display *display, pid_t browser_pid)
+    /**
+     * Main function to find the browser window by first checking the _NET_CLIENT_LIST for windows owned by the browser PID.
+     */
+    Window find_browser_client(Display *display, pid_t browser_pid)
     {
         Window root = DefaultRootWindow(display);
         Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
         if (atom_client_list != None)
         {
-            Atom actual_type = None;
-            int actual_format = 0;
-            unsigned long nitems = 0;
-            unsigned long bytes_after = 0;
-            unsigned char *prop = nullptr;
+            Property property;
+            bool read_ok = get_property(display, root, atom_client_list, XA_WINDOW, 4096, property);
 
-            int status = XGetWindowProperty(
-                    display,
-                    root,
-                    atom_client_list,
-                    0,
-                    4096,
-                    False,
-                    XA_WINDOW,
-                    &actual_type,
-                    &actual_format,
-                    &nitems,
-                    &bytes_after,
-                    &prop);
-
-            if (status == Success && prop && actual_type == XA_WINDOW)
+            if (read_ok && property.prop && property.actual_type == XA_WINDOW)
             {
-                Window *windows = reinterpret_cast<Window *>(prop);
+                Window *windows = reinterpret_cast<Window *>(property.prop);
                 Window child_fallback = 0;
-                for (unsigned long i = 0; i < nitems; i++)
+                for (unsigned long i = 0; i < property.nitems; i++)
                 {
                     pid_t owner_pid = -1;
-                    if (!get_window_pid(display, windows[i], owner_pid))
+                    if (!get_pid(display, windows[i], owner_pid))
                     {
                         continue;
                     }
 
                     if (owner_pid == browser_pid)
                     {
-                        XFree(prop);
+                        free_property(property);
                         return windows[i];
                     }
 
@@ -211,16 +257,14 @@ namespace
                     }
                 }
 
-                XFree(prop);
                 if (child_fallback)
                 {
+                    free_property(property);
                     return child_fallback;
                 }
             }
-            else if (prop)
-            {
-                XFree(prop);
-            }
+
+            free_property(property);
         }
 
         Window any_owned = find_browser_owned_descendant_recursive(display, root, browser_pid);
@@ -232,30 +276,365 @@ namespace
         return find_toplevel_root_child(display, root, any_owned);
     }
 
-    void toggle_browser_visibility(pid_t browser_pid, bool visible)
+    /**
+     * Helper function to check if a window has the WM_STATE property, which is a strong indicator
+     * that it's a top-level application window rather than a transient or child window.
+     */
+    bool has_wm_state(Display *display, Window window)
     {
-        Display *display = XOpenDisplay(nullptr);
+        Atom wm_state = XInternAtom(display, "WM_STATE", True);
+        if (wm_state == None)
+        {
+            return false;
+        }
+
+        Property property;
+        bool read_ok = get_property(display, window, wm_state, wm_state, 2, property);
+        bool has_state = read_ok && property.actual_type == wm_state && property.nitems > 0;
+
+        free_property(property);
+        return has_state;
+    }
+
+    /**
+     * Main function to resolve the actual client window of the browser,
+     * which may involve checking the top-level window and its children
+     */
+    Window resolve_client(Display *display, pid_t browser_pid)
+    {
         if (!display)
         {
-            return; // Failed to open display
-        }
-        
-        if (!browser_window || !try_get_window_attrs(display, browser_window))
-        {
-            browser_window = find_browser_client_window(display, browser_pid);
+            return 0;
         }
 
-        if (!browser_window)
+        Window window = find_browser_client(display, browser_pid);
+        if (!window)
         {
-            XCloseDisplay(display);
-            return; // Failed to find browser window
+            return 0;
         }
 
-        // Show or hide the browser window
-        visible ? XMapWindow(display, browser_window) : XUnmapWindow(display, browser_window);
+        if (has_wm_state(display, window))
+        {
+            return window;
+        }
+
+        Window root_return = 0;
+        Window parent_return = 0;
+        Window *children = nullptr;
+        unsigned int nchildren = 0;
+
+        if (!XQueryTree(display, window, &root_return, &parent_return, &children, &nchildren))
+        {
+            return window;
+        }
+
+        Window client = 0;
+        for (unsigned int i = 0; i < nchildren; i++)
+        {
+            if (has_wm_state(display, children[i]))
+            {
+                client = children[i];
+                break;
+            }
+        }
+
+        if (children)
+        {
+            XFree(children);
+        }
+
+        return client ? client : window;
+    }
+
+    /**
+     * Helper function to execute an action in the context of the browser window.
+     */
+    template<typename Func>
+    bool with_browser(int flash_pid, int browser_pid, Func&& action)
+    {
+        if (flash_pid == -1 || !x11_control_available())
+            return false;
+
+        Display *display = XOpenDisplay(nullptr);
+        if (!display)
+            return false;
+
+        if (!browser_window || !try_get_attrs(display, browser_window))
+            browser_window = resolve_client(display, browser_pid);
+
+        bool result = false;
+        if (browser_window)
+            result = action(display, browser_window);
 
         XFlush(display);
         XCloseDisplay(display);
+        return result;
+    }
+}
+
+namespace mouse
+{
+    struct EventContext
+    {
+        Display *display;
+        Window window;
+        Window root;
+        int local_x, local_y;
+        int root_x, root_y;
+    };
+
+    /**
+     * Prepares the context for a mouse event by translating local coordinates to root coordinates.
+     */
+    bool prepare_event(Display *display, Window window, int32_t x, int32_t y, EventContext &ctx)
+    {
+        if (!display || !window)
+        {
+            return false;
+        }
+
+        XWindowAttributes attrs;
+        if (XGetWindowAttributes(display, window, &attrs) == 0)
+        {
+            return false;
+        }
+
+        ctx.display = display;
+        ctx.window = window;
+        ctx.local_x = x;
+        ctx.local_y = y;
+
+        // Clamp coordinates to the window bounds to avoid unexpected behavior
+        if (ctx.local_x < 0)
+            ctx.local_x = 0;
+        if (ctx.local_y < 0)
+            ctx.local_y = 0;
+        if (attrs.width > 0 && ctx.local_x >= attrs.width)
+            ctx.local_x = attrs.width - 1;
+        if (attrs.height > 0 && ctx.local_y >= attrs.height)
+            ctx.local_y = attrs.height - 1;
+
+        ctx.root = DefaultRootWindow(display);
+        Window child = 0;
+        XTranslateCoordinates(display, window, ctx.root, 0, 0, &ctx.root_x, &ctx.root_y, &child);
+
+        return true;
+    }
+
+    /**
+     * Fills the common fields of an XEvent structure for mouse events, based on the provided context.
+     */
+    void fill_event_common(XEvent &event, const EventContext &ctx)
+    {
+        std::memset(&event, 0, sizeof(event));
+        event.xany.display = ctx.display;
+        event.xany.window = ctx.window;
+        event.xbutton.root = ctx.root;
+        event.xbutton.subwindow = None;
+        event.xbutton.time = CurrentTime;
+        event.xbutton.x = ctx.local_x;
+        event.xbutton.y = ctx.local_y;
+        event.xbutton.x_root = ctx.root_x + ctx.local_x;
+        event.xbutton.y_root = ctx.root_y + ctx.local_y;
+        event.xbutton.send_event = True;
+        event.xbutton.same_screen = True;
+    }
+
+    /**
+     * Sends a mouse move event.
+     */
+    bool send_move(Display *display, Window window, int32_t x, int32_t y)
+    {
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
+            return false;
+
+        XEvent event;
+        fill_event_common(event, ctx);
+        event.type = MotionNotify;
+
+        XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
+        return true;
+    }
+
+    /**
+     * Sends mouse button press/release events.
+     */
+    bool send_button(Display *display, Window window, int32_t x, int32_t y, int button, bool press, bool release)
+    {
+        EventContext ctx;
+        if (!prepare_event(display, window, x, y, ctx))
+            return false;
+
+        XEvent event;
+        fill_event_common(event, ctx);
+        event.xbutton.button = button;
+
+        if (press)
+        {
+            event.type = ButtonPress;
+            XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event);
+        }
+
+        if (release)
+        {
+            event.type = ButtonRelease;
+            XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event);
+        }
+        return true;
+    }
+
+    /**
+     * Sends a mouse wheel event.
+     */
+    bool send_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
+    {
+        return send_button(display, window, x, y, button, true, true);
+    }
+}
+
+namespace cursor_marker
+{
+    static constexpr int dot_size = 6; // 6x6 marker size
+    static constexpr const char *dot_color = "red";
+
+    // State for the cursor marker, including whether it's enabled.
+    struct State
+    {
+        bool enabled = false;
+        Display *display = nullptr;
+        Window window = 0;
+        Window parent = 0;
+        std::chrono::steady_clock::time_point last_time;
+        std::mutex mutex;
+    };
+
+    static State state;
+
+    /**
+     * Destroys the cursor marker window and closes the display connection.
+     */
+    void destroy()
+    {
+        if (state.window && state.display)
+        {
+            XDestroyWindow(state.display, state.window);
+            XCloseDisplay(state.display);
+        }
+        state.window = 0;
+        state.parent = 0;
+        state.display = nullptr;
+    }
+
+    /**
+     * Creates a small red window that will serve as a marker for the virtual cursor position.
+     * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
+     */
+    void create(Window parent)
+    {
+        if (!parent)
+            return;
+
+        destroy();
+
+        state.display = XOpenDisplay(NULL);
+        if (!state.display)
+            return;
+
+        int scr = DefaultScreen(state.display);
+
+        Colormap cmap = DefaultColormap(state.display, scr);
+        XColor color;
+        XColor exact;
+        if (!XAllocNamedColor(state.display, cmap, dot_color, &color, &exact))
+        {
+            color.pixel = 0; // fallback black
+        }
+
+        XSetWindowAttributes attr;
+        attr.background_pixel = color.pixel;
+        attr.background_pixmap = None;
+
+        unsigned long mask = CWBackPixel;
+        state.window = XCreateWindow(
+            state.display,
+            parent,
+            0, 0, dot_size, dot_size, 0,
+            CopyFromParent,
+            InputOutput,
+            CopyFromParent,
+            mask,
+            &attr);
+        state.parent = parent;
+
+        // make the window input-transparent so it doesn't grab events
+        int shape_event, shape_error;
+        if (XShapeQueryExtension(state.display, &shape_event, &shape_error))
+        {
+            XRectangle rect = {0, 0, 0, 0};
+            XShapeCombineRectangles(state.display,
+                                    state.window,
+                                    ShapeInput,
+                                    0, 0,
+                                    &rect,
+                                    1,
+                                    ShapeSet,
+                                    Unsorted);
+        }
+
+        XMapRaised(state.display, state.window);
+        XFlush(state.display);
+    }
+
+    /**
+     * Checks if the cursor marker should be hidden due to inactivity (no updates for 3 seconds) and hides it if necessary.
+     */
+    void maybe_clear()
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (!state.enabled)
+            return;
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - state.last_time >= std::chrono::seconds(3))
+        {
+            destroy();
+        }
+    }
+
+    /**
+     * Updates the position of the cursor marker to the given coordinates.
+     */
+    void update(int x, int y, int flash_pid, int browser_pid)
+    {
+        if (!state.enabled || flash_pid == -1 || !window::x11_control_available())
+            return;
+
+        // record last update time
+        {
+            std::lock_guard<std::mutex> lock(state.mutex);
+            state.last_time = std::chrono::steady_clock::now();
+        }
+
+        window::with_browser(flash_pid, browser_pid, [&](Display *display, Window browser) {
+            if (!state.window || !state.display || state.parent != browser || !window::try_get_attrs(state.display, state.window))
+                create(browser);
+
+            if (!state.window || !state.display)
+                return false;
+
+            const int offset = static_cast<int>(std::lround(dot_size / 2.0));
+            XMoveWindow(state.display, state.window, x - offset, y - offset);
+            XMapRaised(state.display, state.window);
+            XFlush(state.display);
+            return true;
+        });
+
+        // schedule a hide check in 3 seconds
+        std::thread([]() {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            maybe_clear();
+        }).detach();
     }
 }
 
@@ -359,27 +738,21 @@ union Message
     GetSignatureMessage sig;
 };
 
-
-BotClient::BotClient() :
-    m_browser_ipc(new SockIpc())
-{
-}
+BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
-    if (m_flash_pid == -1 || !x11_window_control_available())
-    {
-        return;
-    }
-
-    toggle_browser_visibility(m_browser_pid, visible);
+    window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        visible ? XMapWindow(display, browser) : XUnmapWindow(display, browser);
+        return true;
+    });
 }
 
 BotClient::~BotClient()
 {
-    if (m_browser_pid > 0)
+    if (Pid() > 0)
     {
-        kill(m_browser_pid, SIGKILL);
+        kill(Pid(), SIGKILL);
     }
 }
 
@@ -389,8 +762,37 @@ void sigchld_handler(int signal)
     waitpid(0, &status, WNOHANG);
 }
 
+
+void BotClient::Refresh()
+{
+    utils::log("[Refresh] Triggering browser refresh\n");
+
+    if (!SendBrowserCommand("refresh"))
+    {
+        utils::log("[Refresh] refresh command failed\n");
+        // Reset IPC so we can attempt to reconnect
+        m_browser_ipc.reset(new SockIpc());
+        return;
+    }
+
+    // if there's an existing flash process, kill it so we don't keep
+    // reusing the same PID after a refresh.
+    if (FlashPid() > 0)
+        kill(FlashPid(), SIGKILL);
+
+    reset();
+}
+
 void BotClient::LaunchBrowser()
 {
+    const char *fpath = "lib/darkbot_browser_linux.AppImage";
+    /* ensure the browser binary exists before attempting to fork/exec */
+    if (access(fpath, F_OK) != 0)
+    {
+        fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
+        return;
+    }
+
     int pid = fork();
 
     switch (pid)
@@ -402,8 +804,6 @@ void BotClient::LaunchBrowser()
         }
         case 0:
         {
-            const char *fpath = "lib/backpage-linux-x86_64.AppImage";
-
             std::vector<const char *> envp
             {
                 "LD_PRELOAD=lib/libdo_lib.so",
@@ -427,74 +827,182 @@ void BotClient::LaunchBrowser()
                 sid.replace(0, 6, "");
             }
 
-                execle(
-                    fpath,
-                    fpath,
-                    "--sid", sid.c_str(),
-                    "--url", url.c_str(),
-                    "--launch",
-                    "--ozone-platform=x11",
-                    "--disable-background-timer-throttling",
-                    "--disable-renderer-backgrounding",
-                    NULL,
-                    envp.data());
+            execle(
+                fpath,
+                fpath,
+                "--sid", sid.c_str(),
+                "--url", url.c_str(),
+                "--launch",
+                "--ozone-platform=x11",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                NULL,
+                envp.data());
+
             break;
         }
         default:
         {
             signal(SIGCHLD, sigchld_handler);
 
-            m_browser_pid = pid;
+            SetPid(pid);
             break;
         }
     }
 }
 
-void BotClient::SendBrowserCommand(const std::string &&message, int sync)
+// helper used within SendBrowserCommand; returns true when the IPC
+// connection is ready (either already connected or successfully created).
+bool BotClient::ensure_browser_ipc_connected()
 {
-    if (m_browser_pid > 0 && !ProcUtil::ProcessExists(m_browser_pid))
+    if (m_browser_ipc->Connected())
+        return true;
+
+    if (Pid() < 0)
+        return false;
+
+    std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
+    //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
+    if (!m_browser_ipc->Connect(ipc_path))
+    {
+        printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Builds a JSON string for the given command and parameters, including a timestamp for uniqueness.
+ */
+static std::string build_browser_command_json(const std::string &cmd, std::initializer_list<JsonParam> params)
+{
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+    char ts_buf[32];
+    auto [ts_ptr, ts_ec] = std::to_chars(ts_buf, ts_buf + sizeof(ts_buf), ms);
+    if (ts_ec != std::errc())
+    {
+        ts_ptr = ts_buf;
+    }
+
+    size_t reserve_size = cmd.size() + static_cast<size_t>(ts_ptr - ts_buf) + 16;
+    for (const JsonParam &param : params)
+    {
+        reserve_size += 4 + std::strlen(param.key) + param.value.size();
+    }
+
+    std::string json;
+    json.reserve(reserve_size);
+    json.append("{\"cmd\":\"");
+    json.append(cmd);
+    json.append("\",\"ts\":");
+    json.append(ts_buf, static_cast<size_t>(ts_ptr - ts_buf));
+
+    for (const JsonParam &param : params)
+    {
+        json.append(",\"");
+        json.append(param.key);
+        json.append("\":");
+        json.append(param.value.data(), param.value.size());
+    }
+
+    json.push_back('}');
+    return json;
+}
+
+/**
+ * Sends a command to the browser process via IPC, with retries and acknowledgment handling.
+ * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
+ */
+bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params)
+{
+    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
-        m_flash_pid = -1;
-        return;
+        reset();
+        return false;
     }
 
-    if (!m_browser_ipc->Connected())
+    if (!ensure_browser_ipc_connected())
     {
-        if (m_browser_pid < 0)
-        {
-            return;
-        }
-
-        std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", m_browser_pid);
-
-        //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
-
-        if (!m_browser_ipc->Connect(ipc_path))
-        {
-            printf("[SendBrowserCommand] Failed to connect to browser %d\n", m_browser_pid);
-            return;
-        }
+        return false;
     }
 
-    //printf("[SendBrowserCommand] Sending message %s\n", message.c_str());
+    std::string json = build_browser_command_json(cmd, params);
+    std::string expected_ack;
+    expected_ack.reserve(json.size() + 3);
+    expected_ack.append(json);
+    expected_ack.append("|ok"); // the JS side appends "|ok" to acknowledge receipt and processing
+    int maxAttempts = 3;
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
 
-    m_browser_ipc->Send(message);
-    return;
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+    {
+        if (!m_browser_ipc->Send(json.c_str()))
+        {
+            utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
+            // try reconnect
+            m_browser_ipc.reset(new SockIpc());
+            if (!ensure_browser_ipc_connected())
+            {
+                utils::log("[SendBrowserCommand] reconnect attempt failed\n");
+                return false;
+            }
+            continue; // retry send
+        }
+
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            std::string reply;
+            if (m_browser_ipc->Recv(reply))
+            {
+                if (reply.find(expected_ack) != std::string::npos)
+                {
+                    return true; // success
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", json.c_str(), attempt, maxAttempts);
+    }
+
+    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", json.c_str());
+    return false;
 }
 
 bool BotClient::find_flash_process()
 {
-    auto procs = ProcUtil::FindProcsByName("no-sandbox");
+    // require all substrings when scanning /proc.
+    auto procs = ProcUtil::FindProcsByName({"darkbot_browser", "no-sandbox", "ppapi"});
+
+    int best_pid = -1;
+    uint64_t best_memory = 0;
+
     for (int proc_pid : procs)
     {
-        if (ProcUtil::IsChildOf(proc_pid, m_browser_pid) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        if (ProcUtil::IsChildOf(proc_pid, Pid()) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
         {
-            m_flash_pid = proc_pid;
-            return true;
+            // Search for the flash process with the most memory usage,
+            // since the browser can spawn multiple and we want to target the main one
+            uint64_t memory = ProcUtil::GetMemoryUsage(proc_pid);
+            if (memory >= best_memory)
+            {
+                best_memory = memory;
+                best_pid = proc_pid;
+            }
         }
     }
+
+    if (best_pid > 0)
+    {
+        SetFlashPid(best_pid);
+        return true;
+    }
+
     return false;
 }
 
@@ -506,7 +1014,7 @@ void BotClient::reset()
 
 
     m_shared_mem_flash = nullptr;
-    m_flash_pid = -1;
+    SetFlashPid(-1);
     m_flash_sem = -1;
     m_flash_shmid = -1;
 }
@@ -514,40 +1022,42 @@ void BotClient::reset()
 // Not a great name since it has side-effects like refreshgin or restarting the browser
 bool BotClient::IsValid()
 {
-    if (m_browser_pid > 0 && !ProcUtil::ProcessExists(m_browser_pid))
+    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
         fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
+        reset();
         return false;
     }
 
-
-    if (m_flash_pid == -1)
+    if (FlashPid() == -1)
     {
         return find_flash_process();
     }
 
-    if (!ProcUtil::ProcessExists(m_flash_pid))
+    if (!ProcUtil::ProcessExists(FlashPid()))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", m_flash_pid, m_browser_pid);
-        SendBrowserCommand("refresh", 1);
-        reset();
+        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
+        Refresh();
         return false;
     }
     return true;
 }
 
-void BotClient::SendFlashCommand(Message *message, Message *response)
+/**
+ * Sends a command message to the flash process via shared memory and semaphores, and optionally waits for a response.
+ */
+bool BotClient::SendFlashCommand(Message *message, Message *response)
 {
     if (!IsValid())
     {
-        return;
+        return false;
     }
 
-    if ((m_flash_shmid = shmget(m_flash_pid, MEM_SIZE, IPC_CREAT | 0666)) < 0)
+    if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
         fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
-        return;
+        return false;
     }
 
     if (!m_shared_mem_flash || m_shared_mem_flash == (void *)-1)
@@ -555,17 +1065,17 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
         if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
         {
             fprintf(stderr, "[SendFlashCommand] Failed to attach shared memory to our process\n");
-            return;
+            return false;
         }
     }
 
     if (m_flash_sem < 0)
     {
-        if ((m_flash_sem = semget(m_flash_pid , 2, IPC_CREAT | 0600)) < 0)
+        if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
-            m_flash_pid = -1;
+            SetFlashPid(-1);
             fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
-            return;
+            return false;
         }
     }
 
@@ -575,34 +1085,42 @@ void BotClient::SendFlashCommand(Message *message, Message *response)
     static timespec timeout { .tv_sec = 1, .tv_nsec = 0 };
     sembuf sop[2] { { 0, -1, 0 }, { 1, 0, 0 } };
 
+    bool success = true;
+
     // Notify
     if (semtimedop(m_flash_sem, &sop[0], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            return;
+            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+        }
+        success = false;
     }
 
     // Wait
-    if (semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
+    if (success && semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, timeout\n");
-            return;
+            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
         }
-        perror("[SendFlashCommand] semop failed");
-        return;
+        else
+        {
+            perror("[SendFlashCommand] semop failed");
+        }
+        success = false;
     }
 
-    if (response)
+    if (response && success)
     {
         memcpy(response, m_shared_mem_flash, sizeof(Message));
     }
+
+    return success;
 }
 
 bool BotClient::SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args)
@@ -664,24 +1182,231 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
     return response.result.value;
 }
 
-bool BotClient::ClickKey(uint32_t key)
+/**
+ * Sends a key click event to the flash process via shared memory and semaphores.
+ *
+ * Note: works a bit better than sending command to the browser.
+ */
+bool BotClient::KeyClickLegacy(uint32_t key)
 {
     Message message;
     message.type = MessageType::KEY_CLICK;
     message.key.key = key;
-    SendFlashCommand(&message);
-    return true;
+    return SendFlashCommand(&message);
 }
 
-bool BotClient::MouseClick(int32_t x, int32_t y, uint32_t button)
+void BotClient::KeyClick(uint32_t key)
+{
+    // First try sending key click via legacy flash IPC method (works a bit better).
+    bool success = KeyClickLegacy(key);
+
+    // If failed, then send via browser command
+    if (!success)
+        success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
+}
+
+void BotClient::KeyDown(uint32_t key)
+{
+    SendBrowserCommand("keyDown", {{"key", std::to_string(key)}});
+}
+
+void BotClient::KeyUp(uint32_t key)
+{
+    SendBrowserCommand("keyUp", {{"key", std::to_string(key)}});
+}
+
+void BotClient::SendText(const std::string &text)
+{
+    SendBrowserCommand("text", {{"text", utils::escape_json(text)}});
+}
+
+/**
+ * Sends a mouse click event to the flash process via shared memory and semaphores,
+ * using the legacy method when X11 control is unavailable.
+ * 
+ * Note: may not work properly for some game actions.
+ */
+bool BotClient::MouseClickLegacy(int32_t x, int32_t y)
 {
     Message message;
     message.type = MessageType::MOUSE_CLICK;
     message.click.x = x;
     message.click.y = y;
-    message.click.button = button;
-    SendFlashCommand(&message);
-    return true;
+    message.click.button = 1;
+    return SendFlashCommand(&message);
+}
+
+void BotClient::MouseClick(int32_t x, int32_t y)
+{
+    // First try sending click via X11 for better compatibility with all game actions
+    bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        return mouse::send_button(display, browser, x, y, Button1, true, true);
+    });
+
+    // If X11 method failed, fall back to legacy flash IPC method.
+    if (!success)
+        success = MouseClickLegacy(x, y);
+
+    if (success)
+        UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseMove(int32_t x, int32_t y)
+{
+    bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        return mouse::send_move(display, browser, x, y);
+    });
+
+    if (success)
+        UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseDown(int32_t x, int32_t y)
+{
+    bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        return mouse::send_button(display, browser, x, y, Button1, true, false);
+    });
+
+    if (success)
+        UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseUp(int32_t x, int32_t y)
+{
+    bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        return mouse::send_button(display, browser, x, y, Button1, false, true);
+    });
+
+    if (success)
+        UpdateCursorMarker(x, y);
+}
+
+void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
+{
+    int button = delta >= 0 ? Button4 : Button5;
+    bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
+        return mouse::send_wheel(display, browser, x, y, button);
+    });
+
+    if (success)
+        UpdateCursorMarker(x, y);
+}
+
+// process a batch of encoded native actions.
+void BotClient::PostActions(const std::vector<uint64_t> &actions)
+{
+    std::lock_guard<std::mutex> lock(m_post_actions_mutex);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
+
+    for (uint64_t value : actions)
+    {
+        if (std::chrono::steady_clock::now() >= deadline)
+            break;
+
+        uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
+        int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
+        int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
+        int16_t lparam_high = static_cast<int16_t>((value >> 16) & 0xffff);
+
+        int32_t x = static_cast<int32_t>(lparam_low);
+        int32_t y = static_cast<int32_t>(lparam_high);
+        uint32_t key = static_cast<uint32_t>(wparam);
+
+        // Handle native mouse and keyboard events based on the message type.
+        // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
+
+        switch (message)
+        {
+            case 0x1FF: // Mouse CLICK
+                MouseClick(x, y);
+                break;
+            case 0x200: // Mouse MOVE
+                MouseMove(x, y);
+                break;
+            case 0x201: // Mouse DOWN
+                MouseDown(x, y);
+                break;
+            case 0x202: // Mouse UP
+                MouseUp(x, y);
+                break;
+            case 0x20A: // Mouse WHEEL
+                MouseScroll(x, y, wparam);
+                break;
+            case 0x1FE: // Key CLICK
+                KeyClick(key);
+                break;
+            case 0x100: // Key DOWN
+                KeyDown(key);
+                break;
+            case 0x101: // Key UP
+                KeyUp(key);
+                break;
+            case 0x102: // Key CHAR
+                {
+                    std::string text(1, static_cast<char>(wparam));
+                    SendText(text);
+                }
+                break;
+            default:
+                // unsupported message, ignore
+                break;
+        }
+    }
+}
+
+// paste a string to the game, optionally performing native actions before/after
+void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &actions)
+{
+    // split inline vector into before/after lists using high-bit flag
+    const uint64_t AFTER_MASK = (1ULL << 63);
+    std::vector<uint64_t> before;
+    std::vector<uint64_t> after;
+    for (uint64_t v : actions) {
+        if (v & AFTER_MASK)
+            after.push_back(v);
+        else
+            before.push_back(v);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_paste_mutex);
+        m_paste_queue.push({before, text, after});
+    }
+
+    // start worker thread once
+    if (!m_paste_worker_running.exchange(true)) {
+        std::thread([this]() {
+            while (true) {
+                std::tuple<std::vector<uint64_t>, std::string, std::vector<uint64_t>> item;
+                {
+                    std::lock_guard<std::mutex> lock(m_paste_mutex);
+                    if (m_paste_queue.empty())
+                        break;
+                    item = m_paste_queue.front();
+                    m_paste_queue.pop();
+                }
+
+                auto &[before_actions, str, after_actions] = item;
+
+                if (!before_actions.empty())
+                {
+                    PostActions(before_actions);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+
+                SendText(str);
+                std::this_thread::sleep_for(std::chrono::milliseconds(750));
+
+                if (!after_actions.empty())
+                {
+                    PostActions(after_actions);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                }
+            }
+            m_paste_worker_running = false;
+        }).detach();
+    }
 }
 
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
@@ -699,4 +1424,22 @@ int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check
     SendFlashCommand(&message, &response);
 
     return response.sig.result;
+}
+
+void BotClient::EnableCursorMarker(bool enable)
+{
+    if (enable == cursor_marker::state.enabled)
+        return;
+
+    cursor_marker::state.enabled = enable;
+    if (!enable)
+    {
+        std::lock_guard<std::mutex> lock(cursor_marker::state.mutex);
+        cursor_marker::destroy();
+    }
+}
+
+void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
+{
+    cursor_marker::update(x, y, FlashPid(), Pid());
 }

@@ -2,3 +2,6 @@ build/
 .cache
 compile_commands.json
 .ccls
+
+# local helper script
+copy.sh
