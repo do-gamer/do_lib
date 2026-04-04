@@ -9,6 +9,7 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <vector>
 #include <sstream>
 
@@ -795,8 +796,12 @@ void BotClient::LaunchBrowser()
     }
     if (access(fpath, X_OK) != 0)
     {
-        utils::log("[LaunchBrowser] browser binary not executable: {}\n", fpath);
-        return;
+        mode_t mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+        if (chmod(fpath, mode) != 0)
+        {
+            utils::log("[LaunchBrowser] browser binary not executable and chmod failed: {} ({})\n", fpath, std::strerror(errno));
+            return;
+        }
     }
 
     int pid = fork();
