@@ -37,29 +37,31 @@ union Message
 };
 
 
-bool ipc::Server::Init(int pid)
+bool ipc::Server::Init()
 {
+    int pid = getpid();
+
     if ((shmid = shmget(pid, MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
-        utils::format("[ipc::Server::init] Failed to get shared memory: {}\n", strerror(errno));
+        utils::log("[ipc::Server::init] Failed to get shared memory: {}\n", strerror(errno));
         return false;
     }
 
     if ((sem = semget(pid, 2, IPC_CREAT | 0666)) < 0)
     {
-        utils::format("[ipc::Server::init] Failed to create shared semaphore: {}\n", strerror(errno));
+        utils::log("[ipc::Server::init] Failed to create shared semaphore: {}\n", strerror(errno));
         return false;
     }
 
     if ((shared = reinterpret_cast<Message *>(shmat(shmid, NULL, 0))) == (Message *)-1)
     {
-        utils::format("[ipc::Server::init] Failed to attach shared memory to our process: {}\n", strerror(errno));
+        utils::log("[ipc::Server::init] Failed to attach shared memory to our process: {}\n", strerror(errno));
         return false;
     }
 
     if (semctl(sem, 0, SETVAL, 1) == -1 || semctl(sem, 1, SETVAL, 0) == -1)
     {
-        utils::format("[ipc::Server::init] semctl failed: {}\n", strerror(errno));
+        utils::log("[ipc::Server::init] semctl failed: {}\n", strerror(errno));
         return false;
     }
 
@@ -70,9 +72,9 @@ void ipc::Server::Remove()
 {
     union semun dummy;
     if (shmctl(shmid, IPC_RMID, NULL) == -1)
-        utils::format("[ipc::Server::Remove] shmctl failed: {}\n", strerror(errno));
+        utils::log("[ipc::Server::Remove] shmctl failed: {}\n", strerror(errno));
     if (semctl(sem, 0, IPC_RMID, dummy) == -1)
-        utils::format("[ipc::Server::Remove] semctl failed: {}\n", strerror(errno));
+        utils::log("[ipc::Server::Remove] semctl failed: {}\n", strerror(errno));
 }
 
 void ipc::Server::handle_message()
@@ -97,7 +99,7 @@ void ipc::Server::runner()
         {
             if (errno == EINTR)
                 continue;
-            utils::format("[ipc::Server::runner] semop1 failed {}\n", strerror(errno));
+            utils::log("[ipc::Server::runner] semop1 failed {}\n", strerror(errno));
             running = false;
             break;
         }
@@ -108,7 +110,7 @@ void ipc::Server::runner()
         sop[1] = { .sem_num=1, .sem_op=-1, .sem_flg=0 };
         if (semop(sem, sop, 2) == -1)
         {
-            utils::format("[ipc::Server::runner] semop2 failed {}\n", strerror(errno));
+            utils::log("[ipc::Server::runner] semop2 failed {}\n", strerror(errno));
             running = false;
             break;
         }
@@ -120,25 +122,25 @@ bool ipc::Client::Connect(int ipc_id)
 {
     if ((shmid = shmget(ipc_id, MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
-        perror("Failed to get shared memory");
+        utils::log("[ipc::Client::Connect] Failed to get shared memory: {}\n", strerror(errno));
         return false;
     }
 
     if ((shared = shmat(shmid, NULL, 0)) == (void *)-1)
     {
-        perror("Failed to attach shared memory to our process");
+        utils::log("[ipc::Client::Connect] Failed to attach shared memory to our process: {}\n", strerror(errno));
         return false;
     }
 
     if ((sem  = semget(ipc_id, 2, IPC_CREAT | 0600)) < 0)
     {
-        perror("Failed to create shared semaphore");
+        utils::log("[ipc::Client::Connect] Failed to create shared semaphore: {}\n", strerror(errno));
         return false;
     }
 
     if (semctl(sem, 0, SETVAL, 1) == -1 || semctl(sem, 1, SETVAL, 0) == -1)
     {
-        perror("Failed to set browser ipc sempahore value");
+        utils::log("[ipc::Client::Connect] Failed to set browser ipc semaphore value: {}\n", strerror(errno));
         return false;
     }
 

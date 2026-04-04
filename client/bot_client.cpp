@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cerrno>
 #include <cmath>
 #include <charconv>
 #include <mutex>
@@ -789,12 +790,12 @@ void BotClient::LaunchBrowser()
     /* ensure the browser binary exists and is executable before attempting to fork/exec */
     if (access(fpath, F_OK) != 0)
     {
-        fprintf(stderr, "[LaunchBrowser] browser binary not found: %s\n", fpath);
+        utils::log("[LaunchBrowser] browser binary not found: {}\n", fpath);
         return;
     }
     if (access(fpath, X_OK) != 0)
     {
-        fprintf(stderr, "[LaunchBrowser] browser binary not executable: %s\n", fpath);
+        utils::log("[LaunchBrowser] browser binary not executable: {}\n", fpath);
         return;
     }
 
@@ -804,7 +805,7 @@ void BotClient::LaunchBrowser()
     {
         case -1: // https://rachelbythebay.com/w/2014/08/19/fork/
         {
-            perror("Fork failed.");
+            utils::log("Fork failed: {}\n", std::strerror(errno));
             break;
         }
         case 0:
@@ -867,10 +868,9 @@ bool BotClient::ensure_browser_ipc_connected()
         return false;
 
     std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
-    //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
     if (!m_browser_ipc->Connect(ipc_path))
     {
-        printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
+        utils::log("[SendBrowserCommand] Failed to connect to browser {}\n", Pid());
         return false;
     }
     return true;
@@ -924,7 +924,7 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
-        fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
+        utils::log("[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
         return false;
@@ -1029,7 +1029,7 @@ bool BotClient::IsValid()
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
-        fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
+        utils::log("[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
         return false;
@@ -1042,7 +1042,7 @@ bool BotClient::IsValid()
 
     if (!ProcUtil::ProcessExists(FlashPid()))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
+        utils::log("[IsValid] Flash process not found, trying to refresh {}, {}\n", FlashPid(), Pid());
         Refresh();
         return false;
     }
@@ -1061,7 +1061,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
 
     if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
-        fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
+        utils::log("[SendFlashCommand] Failed to get shared memory\n");
         return false;
     }
 
@@ -1069,7 +1069,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to attach shared memory to our process\n");
+            utils::log("[SendFlashCommand] Failed to attach shared memory to our process\n");
             return false;
         }
     }
@@ -1079,7 +1079,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
         if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
             SetFlashPid(-1);
-            fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
+            utils::log("[SendFlashCommand] Failed to create semaphore\n");
             return false;
         }
     }
@@ -1097,11 +1097,11 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
+            utils::log("[SendFlashCommand] Failed to send command to flash, notify timeout\n");
         }
         else
         {
-            perror("[SendFlashCommand] semop failed");
+            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
         }
         success = false;
     }
@@ -1111,11 +1111,11 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
+            utils::log("[SendFlashCommand] Failed to send command to flash, wait timeout\n");
         }
         else
         {
-            perror("[SendFlashCommand] semop failed");
+            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
         }
         success = false;
     }
