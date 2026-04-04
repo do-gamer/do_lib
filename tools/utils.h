@@ -12,10 +12,6 @@
 #define LOG_FILE "/tmp/do_output.txt"
 #endif
 
-#ifndef DEBUG
-#define DEBUG 1
-#endif
-
 namespace utils
 {
     static inline void format(std::stringstream &of, const char *data)
@@ -82,12 +78,8 @@ namespace utils
 
     static inline void log(const char *data)
     {
-    #ifdef DEBUG
         std::ofstream fhandle{ LOG_FILE, std::ios::app };
         fhandle << data;
-    #else
-        (void)data;
-    #endif
     }
 
     template <typename T, typename... Args>

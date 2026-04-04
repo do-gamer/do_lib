@@ -786,10 +786,15 @@ void BotClient::Refresh()
 void BotClient::LaunchBrowser()
 {
     const char *fpath = "lib/darkbot_browser_linux.AppImage";
-    /* ensure the browser binary exists before attempting to fork/exec */
+    /* ensure the browser binary exists and is executable before attempting to fork/exec */
     if (access(fpath, F_OK) != 0)
     {
-        fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
+        fprintf(stderr, "[LaunchBrowser] browser binary not found: %s\n", fpath);
+        return;
+    }
+    if (access(fpath, X_OK) != 0)
+    {
+        fprintf(stderr, "[LaunchBrowser] browser binary not executable: %s\n", fpath);
         return;
     }
 
