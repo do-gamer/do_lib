@@ -5,6 +5,8 @@ const {initSplashScreen} = require("@trodi/electron-splashscreen")
 
 let mainWindow;
 
+function log(...args) { console.log('[browser]', ...args); }
+
 app.commandLine.appendSwitch('ppapi-flash-path', getFlashPath())
 
 const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
@@ -14,7 +16,7 @@ var server = net.createServer(function (sock) {
 
     sock.on('data', (data) => {
         if (!mainWindow) {
-            console.log("[browser] Received command but mainWindow is not initialized, ignoring");
+            log("Received command but mainWindow is not initialized, ignoring");
             return;
         }
 
@@ -22,7 +24,7 @@ var server = net.createServer(function (sock) {
             const obj = JSON.parse(data);
             switch (obj.cmd) {
                 case "refresh":
-                    console.log("[browser] Received refresh command, reloading...");
+                    log("Received refresh command, reloading...");
                     mainWindow.reload();
                     break;
                 case "setSize":
@@ -43,7 +45,7 @@ var server = net.createServer(function (sock) {
                     break;
             }
         } catch (e) {
-            console.log("[browser] Failed to parse command:", data, e);
+            log("Failed to parse command:", data, e);
             return;
         }
 
@@ -52,11 +54,11 @@ var server = net.createServer(function (sock) {
     });
 
     sock.on('error', (err) => {
-        console.log("[browser] Socket error", err);
+        log("Socket error", err);
     });
 
     sock.on('close', (hadError) => {
-        console.log("[browser] Socket closed" + (hadError ? " (error)" : ""));
+        log("Socket closed" + (hadError ? " (error)" : ""));
         // client may reconnect later; the server stays listening and will emit
         // a new connection event when that happens.  nothing to do here other
         // than logging/debugging.
@@ -119,7 +121,7 @@ function createWindow(url, sid, launchGame = false) {
         }
     });
 
-    console.log(url, sid, launchGame);
+    log(url, sid, launchGame);
     if (url && sid) {
         window.webContents.session.cookies.set({url: url, name: 'dosid', value: sid})
             .then(() => window.loadURL(url + '/indexInternal.es?action=' + ((launchGame) ? 'internalMapRevolution ': 'internalStart')))

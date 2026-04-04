@@ -744,6 +744,29 @@ union Message
 
 BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
+static void browser_log_drain(int read_fd)
+{
+    char buf[4096];
+    std::string partial;
+    while (true)
+    {
+        ssize_t n = read(read_fd, buf, sizeof(buf) - 1);
+        if (n <= 0)
+            break;
+        buf[n] = '\0';
+        partial.append(buf, static_cast<size_t>(n));
+        size_t pos;
+        while ((pos = partial.find('\n')) != std::string::npos)
+        {
+            std::string line = partial.substr(0, pos);
+            partial.erase(0, pos + 1);
+            if (line.find("[browser]") != std::string::npos)
+                utils::log("{}\n", line.c_str());
+        }
+    }
+    close(read_fd);
+}
+
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
     window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
@@ -877,6 +900,10 @@ void BotClient::LaunchBrowser()
         }
     }
 
+    int log_pipe[2] = {-1, -1};
+    if (pipe(log_pipe) != 0)
+        utils::log("[LaunchBrowser] pipe() failed: {}\n", std::strerror(errno));
+
     int pid = fork();
 
     switch (pid)
@@ -884,10 +911,20 @@ void BotClient::LaunchBrowser()
         case -1: // https://rachelbythebay.com/w/2014/08/19/fork/
         {
             utils::log("Fork failed: {}\n", std::strerror(errno));
+            if (log_pipe[0] != -1) { close(log_pipe[0]); close(log_pipe[1]); }
             break;
         }
         case 0:
         {
+            // redirect browser stdout/stderr into the pipe so the parent can log them
+            if (log_pipe[1] != -1)
+            {
+                dup2(log_pipe[1], STDOUT_FILENO);
+                dup2(log_pipe[1], STDERR_FILENO);
+                close(log_pipe[0]);
+                close(log_pipe[1]);
+            }
+
             std::vector<const char *> envp
             {
                 "LD_PRELOAD=lib/libdo_lib.so",
@@ -928,8 +965,15 @@ void BotClient::LaunchBrowser()
         default:
         {
             signal(SIGCHLD, sigchld_handler);
-
             SetPid(pid);
+
+            // close write end in parent; read end passed to drain thread
+            if (log_pipe[1] != -1) close(log_pipe[1]);
+            if (log_pipe[0] != -1)
+            {
+                int read_fd = log_pipe[0];
+                std::thread([read_fd]() { browser_log_drain(read_fd); }).detach();
+            }
             break;
         }
     }
