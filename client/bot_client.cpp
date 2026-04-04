@@ -953,6 +953,7 @@ void BotClient::LaunchBrowser()
                 fpath,
                 "--sid", sid.c_str(),
                 "--url", url.c_str(),
+                "--api-version", std::to_string(API_VERSION).c_str(),
                 "--launch",
                 "--ozone-platform=x11",
                 "--disable-background-timer-throttling",

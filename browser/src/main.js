@@ -66,7 +66,7 @@ var server = net.createServer(function (sock) {
 });
 server.listen("/tmp/darkbot_ipc_" + process.pid);
 
-function createWindow(url, sid, launchGame = false) {
+function createWindow(url, sid, apiVersion, launchGame = false) {
     let icon = path.join(process.resourcesPath, "res", "icon.png")
 
     let window = initSplashScreen({
@@ -77,7 +77,7 @@ function createWindow(url, sid, launchGame = false) {
             show: false,
             darkTheme: true,
             autoHideMenuBar: true,
-            title: "DarkBot Browser v" + app.getVersion(),
+            title: "DarkBot Browser" + (apiVersion ? ` (Tanos v${apiVersion})` : ""),
             webPreferences: {
                 plugins: true,
                 sandbox: false,
@@ -133,13 +133,13 @@ function createWindow(url, sid, launchGame = false) {
 }
 
 app.whenReady().then(() => {
-    const {url, sid, launchGame} = parseArgv();
-    mainWindow = createWindow(url, sid, launchGame)
+    const {url, sid, apiVersion, launchGame} = parseArgv();
+    mainWindow = createWindow(url, sid, apiVersion, launchGame)
 
     app.on('activate', function () {
         if (BrowserWindow.getAllWindows().length === 0) {
-            const {url, sid, launchGame} = parseArgv();
-            mainWindow = createWindow(url, sid, launchGame)
+            const {url, sid, apiVersion, launchGame} = parseArgv();
+            mainWindow = createWindow(url, sid, apiVersion, launchGame)
         }
     })
 })
@@ -149,7 +149,7 @@ app.on('window-all-closed', function () {
 })
 
 function parseArgv() {
-    let url, sid, launchGame = false
+    let url, sid, apiVersion, launchGame = false
     for (let i = 0; i < process.argv.length; i++) {
         switch (process.argv[i]) {
             case '--url':
@@ -158,12 +158,15 @@ function parseArgv() {
             case '--sid':
                 sid = process.argv[++i]
                 break;
+            case '--api-version':
+                apiVersion = process.argv[++i]
+                break;
             case '--launch':
                 launchGame = true
                 break;
         }
     }
-    return {url, sid, launchGame};
+    return {url, sid, apiVersion, launchGame};
 }
 
 function getFlashPath() {
