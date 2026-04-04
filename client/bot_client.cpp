@@ -5,6 +5,8 @@
 #include <cerrno>
 #include <cmath>
 #include <charconv>
+#include <algorithm>
+#include <cctype>
 #include <mutex>
 #include <thread>
 #include <chrono>
@@ -758,6 +760,70 @@ BotClient::~BotClient()
     }
 }
 
+static std::string shell_escape(const std::string &value)
+{
+    std::string escaped = "'";
+    for (char c : value)
+    {
+        if (c == '\'')
+            escaped += "'\\''";
+        else
+            escaped += c;
+    }
+    escaped += "'";
+    return escaped;
+}
+
+static bool compute_sha256(const std::string &file_path, std::string &out_hash)
+{
+    std::string command = "sha256sum " + shell_escape(file_path);
+    FILE *pipe = popen(command.c_str(), "r");
+    if (!pipe)
+        return false;
+
+    char buffer[256];
+    if (!fgets(buffer, sizeof(buffer), pipe))
+    {
+        pclose(pipe);
+        return false;
+    }
+
+    int status = pclose(pipe);
+    if (status != 0)
+        return false;
+
+    std::istringstream iss(buffer);
+    if (!(iss >> out_hash))
+        return false;
+
+    if (out_hash.size() != 64)
+        return false;
+
+    for (unsigned char c : out_hash)
+    {
+        if (!std::isxdigit(c))
+            return false;
+    }
+
+    std::transform(out_hash.begin(), out_hash.end(), out_hash.begin(), [](unsigned char c) { return std::tolower(c); });
+    return true;
+}
+
+static bool validate_file_sha256(const std::string &file_path, const std::string &expected_hex)
+{
+    if (expected_hex.empty())
+        return false;
+
+    std::string actual_hash;
+    if (!compute_sha256(file_path, actual_hash))
+        return false;
+
+    std::string normalized_expected = expected_hex;
+    std::transform(normalized_expected.begin(), normalized_expected.end(), normalized_expected.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    return actual_hash == normalized_expected;
+}
+
 void sigchld_handler(int signal)
 {
     int status = 0;
@@ -788,10 +854,17 @@ void BotClient::Refresh()
 void BotClient::LaunchBrowser()
 {
     const char *fpath = "lib/darkbot_browser_linux.AppImage";
+    static const std::string expected_sha256 = BROWSER_APPIMAGE_SHA256;
+
     /* ensure the browser binary exists and is executable before attempting to fork/exec */
     if (access(fpath, F_OK) != 0)
     {
         utils::log("[LaunchBrowser] browser binary not found: {}\n", fpath);
+        return;
+    }
+    if (!validate_file_sha256(fpath, expected_sha256))
+    {
+        utils::log("[LaunchBrowser] browser binary SHA256 validation failed: {}\n", fpath);
         return;
     }
     if (access(fpath, X_OK) != 0)
