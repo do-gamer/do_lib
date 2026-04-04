@@ -3,21 +3,59 @@
 
 #include <cmath>
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
 
-#ifndef LOG_FILE
-#define LOG_FILE "/tmp/do_output.txt"
-#endif
-
-#ifndef DEBUG
-#define DEBUG 1
-#endif
+namespace fs = std::filesystem;
 
 namespace utils
 {
+    inline const std::string &log_timestamp_str()
+    {
+        static const std::string ts = []() -> std::string {
+            if (const char *env = getenv("TANOS_START_TIME"))
+                return env;
+
+            std::time_t t = std::time(nullptr);
+            std::tm tm{};
+            localtime_r(&t, &tm);
+            std::stringstream ss;
+            ss << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S");
+            const std::string s = ss.str();
+            setenv("TANOS_START_TIME", s.c_str(), 0);
+            return s;
+        }();
+        return ts;
+    }
+
+    inline const std::string &get_log_file_path()
+    {
+        static const std::string path = []()
+        {
+            const std::string &ts = log_timestamp_str();
+            if (ts.empty())
+                return std::string{};
+
+            std::string filename = ts + "_TanosApi.log";
+            fs::path log_dir = "logs";
+            std::error_code ec;
+            fs::create_directories(log_dir, ec);
+            if (ec)
+                return filename;
+
+            return (log_dir / filename).string();
+        }();
+
+        return path;
+    }
+
     static inline void format(std::stringstream &of, const char *data)
     {
         of << data;
@@ -82,12 +120,13 @@ namespace utils
 
     static inline void log(const char *data)
     {
-    #ifdef DEBUG
-        std::ofstream fhandle{ LOG_FILE, std::ios::app };
-        fhandle << data;
-    #else
-        (void)data;
-    #endif
+        const std::string &path = get_log_file_path();
+        if (path.empty()) return;
+        std::time_t t = std::time(nullptr);
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        std::ofstream fhandle{path, std::ios::app};
+        fhandle << std::put_time(&tm, "[%Y-%m-%d %H:%M:%S] ") << data;
     }
 
     template <typename T, typename... Args>

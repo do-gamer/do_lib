@@ -5,6 +5,8 @@ const {initSplashScreen} = require("@trodi/electron-splashscreen")
 
 let mainWindow;
 
+function log(...args) { console.log('[browser]', ...args); }
+
 app.commandLine.appendSwitch('ppapi-flash-path', getFlashPath())
 
 const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
@@ -14,7 +16,7 @@ var server = net.createServer(function (sock) {
 
     sock.on('data', (data) => {
         if (!mainWindow) {
-            console.log("[browser] Received command but mainWindow is not initialized, ignoring");
+            log("Received command but mainWindow is not initialized, ignoring");
             return;
         }
 
@@ -22,7 +24,7 @@ var server = net.createServer(function (sock) {
             const obj = JSON.parse(data);
             switch (obj.cmd) {
                 case "refresh":
-                    console.log("[browser] Received refresh command, reloading...");
+                    log("Received refresh command, reloading...");
                     mainWindow.reload();
                     break;
                 case "setSize":
@@ -43,7 +45,7 @@ var server = net.createServer(function (sock) {
                     break;
             }
         } catch (e) {
-            console.log("[browser] Failed to parse command:", data, e);
+            log("Failed to parse command:", data, e);
             return;
         }
 
@@ -52,11 +54,11 @@ var server = net.createServer(function (sock) {
     });
 
     sock.on('error', (err) => {
-        console.log("[browser] Socket error", err);
+        log("Socket error", err);
     });
 
     sock.on('close', (hadError) => {
-        console.log("[browser] Socket closed" + (hadError ? " (error)" : ""));
+        log("Socket closed" + (hadError ? " (error)" : ""));
         // client may reconnect later; the server stays listening and will emit
         // a new connection event when that happens.  nothing to do here other
         // than logging/debugging.
@@ -64,7 +66,7 @@ var server = net.createServer(function (sock) {
 });
 server.listen("/tmp/darkbot_ipc_" + process.pid);
 
-function createWindow(url, sid, launchGame = false) {
+function createWindow(url, sid, apiVersion, launchGame = false) {
     let icon = path.join(process.resourcesPath, "res", "icon.png")
 
     let window = initSplashScreen({
@@ -75,7 +77,7 @@ function createWindow(url, sid, launchGame = false) {
             show: false,
             darkTheme: true,
             autoHideMenuBar: true,
-            title: "DarkBot Browser v" + app.getVersion(),
+            title: "DarkBot Browser" + (apiVersion ? ` (Tanos v${apiVersion})` : ""),
             webPreferences: {
                 plugins: true,
                 sandbox: false,
@@ -119,7 +121,7 @@ function createWindow(url, sid, launchGame = false) {
         }
     });
 
-    console.log(url, sid, launchGame);
+    log(url, sid, launchGame);
     if (url && sid) {
         window.webContents.session.cookies.set({url: url, name: 'dosid', value: sid})
             .then(() => window.loadURL(url + '/indexInternal.es?action=' + ((launchGame) ? 'internalMapRevolution ': 'internalStart')))
@@ -131,13 +133,13 @@ function createWindow(url, sid, launchGame = false) {
 }
 
 app.whenReady().then(() => {
-    const {url, sid, launchGame} = parseArgv();
-    mainWindow = createWindow(url, sid, launchGame)
+    const {url, sid, apiVersion, launchGame} = parseArgv();
+    mainWindow = createWindow(url, sid, apiVersion, launchGame)
 
     app.on('activate', function () {
         if (BrowserWindow.getAllWindows().length === 0) {
-            const {url, sid, launchGame} = parseArgv();
-            mainWindow = createWindow(url, sid, launchGame)
+            const {url, sid, apiVersion, launchGame} = parseArgv();
+            mainWindow = createWindow(url, sid, apiVersion, launchGame)
         }
     })
 })
@@ -147,7 +149,7 @@ app.on('window-all-closed', function () {
 })
 
 function parseArgv() {
-    let url, sid, launchGame = false
+    let url, sid, apiVersion, launchGame = false
     for (let i = 0; i < process.argv.length; i++) {
         switch (process.argv[i]) {
             case '--url':
@@ -156,12 +158,15 @@ function parseArgv() {
             case '--sid':
                 sid = process.argv[++i]
                 break;
+            case '--api-version':
+                apiVersion = process.argv[++i]
+                break;
             case '--launch':
                 launchGame = true
                 break;
         }
     }
-    return {url, sid, launchGame};
+    return {url, sid, apiVersion, launchGame};
 }
 
 function getFlashPath() {

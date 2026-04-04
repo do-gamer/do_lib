@@ -2,12 +2,16 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cerrno>
 #include <cmath>
 #include <charconv>
+#include <algorithm>
+#include <cctype>
 #include <mutex>
 #include <thread>
 #include <chrono>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <vector>
 #include <sstream>
 
@@ -740,6 +744,29 @@ union Message
 
 BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
+static void browser_log_drain(int read_fd)
+{
+    char buf[4096];
+    std::string partial;
+    while (true)
+    {
+        ssize_t n = read(read_fd, buf, sizeof(buf) - 1);
+        if (n <= 0)
+            break;
+        buf[n] = '\0';
+        partial.append(buf, static_cast<size_t>(n));
+        size_t pos;
+        while ((pos = partial.find('\n')) != std::string::npos)
+        {
+            std::string line = partial.substr(0, pos);
+            partial.erase(0, pos + 1);
+            if (line.find("[browser]") != std::string::npos)
+                utils::log("{}\n", line.c_str());
+        }
+    }
+    close(read_fd);
+}
+
 void BotClient::ToggleBrowserVisibility(bool visible)
 {
     window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
@@ -754,6 +781,70 @@ BotClient::~BotClient()
     {
         kill(Pid(), SIGKILL);
     }
+}
+
+static std::string shell_escape(const std::string &value)
+{
+    std::string escaped = "'";
+    for (char c : value)
+    {
+        if (c == '\'')
+            escaped += "'\\''";
+        else
+            escaped += c;
+    }
+    escaped += "'";
+    return escaped;
+}
+
+static bool compute_sha256(const std::string &file_path, std::string &out_hash)
+{
+    std::string command = "sha256sum " + shell_escape(file_path);
+    FILE *pipe = popen(command.c_str(), "r");
+    if (!pipe)
+        return false;
+
+    char buffer[256];
+    if (!fgets(buffer, sizeof(buffer), pipe))
+    {
+        pclose(pipe);
+        return false;
+    }
+
+    int status = pclose(pipe);
+    if (status != 0)
+        return false;
+
+    std::istringstream iss(buffer);
+    if (!(iss >> out_hash))
+        return false;
+
+    if (out_hash.size() != 64)
+        return false;
+
+    for (unsigned char c : out_hash)
+    {
+        if (!std::isxdigit(c))
+            return false;
+    }
+
+    std::transform(out_hash.begin(), out_hash.end(), out_hash.begin(), [](unsigned char c) { return std::tolower(c); });
+    return true;
+}
+
+static bool validate_file_sha256(const std::string &file_path, const std::string &expected_hex)
+{
+    if (expected_hex.empty())
+        return false;
+
+    std::string actual_hash;
+    if (!compute_sha256(file_path, actual_hash))
+        return false;
+
+    std::string normalized_expected = expected_hex;
+    std::transform(normalized_expected.begin(), normalized_expected.end(), normalized_expected.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    return actual_hash == normalized_expected;
 }
 
 void sigchld_handler(int signal)
@@ -786,12 +877,32 @@ void BotClient::Refresh()
 void BotClient::LaunchBrowser()
 {
     const char *fpath = "lib/darkbot_browser_linux.AppImage";
-    /* ensure the browser binary exists before attempting to fork/exec */
+    static const std::string expected_sha256 = BROWSER_APPIMAGE_SHA256;
+
+    /* ensure the browser binary exists and is executable before attempting to fork/exec */
     if (access(fpath, F_OK) != 0)
     {
-        fprintf(stderr, "[LaunchBrowser] browser executable not found: %s\n", fpath);
+        utils::log("[LaunchBrowser] browser binary not found: {}\n", fpath);
         return;
     }
+    if (!validate_file_sha256(fpath, expected_sha256))
+    {
+        utils::log("[LaunchBrowser] browser binary SHA256 validation failed: {}\n", fpath);
+        return;
+    }
+    if (access(fpath, X_OK) != 0)
+    {
+        mode_t mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+        if (chmod(fpath, mode) != 0)
+        {
+            utils::log("[LaunchBrowser] browser binary not executable and chmod failed: {} ({})\n", fpath, std::strerror(errno));
+            return;
+        }
+    }
+
+    int log_pipe[2] = {-1, -1};
+    if (pipe(log_pipe) != 0)
+        utils::log("[LaunchBrowser] pipe() failed: {}\n", std::strerror(errno));
 
     int pid = fork();
 
@@ -799,11 +910,21 @@ void BotClient::LaunchBrowser()
     {
         case -1: // https://rachelbythebay.com/w/2014/08/19/fork/
         {
-            perror("Fork failed.");
+            utils::log("Fork failed: {}\n", std::strerror(errno));
+            if (log_pipe[0] != -1) { close(log_pipe[0]); close(log_pipe[1]); }
             break;
         }
         case 0:
         {
+            // redirect browser stdout/stderr into the pipe so the parent can log them
+            if (log_pipe[1] != -1)
+            {
+                dup2(log_pipe[1], STDOUT_FILENO);
+                dup2(log_pipe[1], STDERR_FILENO);
+                close(log_pipe[0]);
+                close(log_pipe[1]);
+            }
+
             std::vector<const char *> envp
             {
                 "LD_PRELOAD=lib/libdo_lib.so",
@@ -832,6 +953,7 @@ void BotClient::LaunchBrowser()
                 fpath,
                 "--sid", sid.c_str(),
                 "--url", url.c_str(),
+                "--api-version", std::to_string(API_VERSION).c_str(),
                 "--launch",
                 "--ozone-platform=x11",
                 "--disable-background-timer-throttling",
@@ -844,8 +966,15 @@ void BotClient::LaunchBrowser()
         default:
         {
             signal(SIGCHLD, sigchld_handler);
-
             SetPid(pid);
+
+            // close write end in parent; read end passed to drain thread
+            if (log_pipe[1] != -1) close(log_pipe[1]);
+            if (log_pipe[0] != -1)
+            {
+                int read_fd = log_pipe[0];
+                std::thread([read_fd]() { browser_log_drain(read_fd); }).detach();
+            }
             break;
         }
     }
@@ -862,10 +991,9 @@ bool BotClient::ensure_browser_ipc_connected()
         return false;
 
     std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
-    //printf("[SendBrowserCommand] Connecting to %s\n", ipc_path.c_str());
     if (!m_browser_ipc->Connect(ipc_path))
     {
-        printf("[SendBrowserCommand] Failed to connect to browser %d\n", Pid());
+        utils::log("[SendBrowserCommand] Failed to connect to browser {}\n", Pid());
         return false;
     }
     return true;
@@ -919,7 +1047,7 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
-        fprintf(stderr, "[SendBrowserCommand] Browser process not found, restarting it\n");
+        utils::log("[SendBrowserCommand] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
         return false;
@@ -1024,7 +1152,7 @@ bool BotClient::IsValid()
 {
     if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
     {
-        fprintf(stderr, "[IsValid] Browser process not found, restarting it\n");
+        utils::log("[IsValid] Browser process not found, restarting it\n");
         LaunchBrowser();
         reset();
         return false;
@@ -1037,7 +1165,7 @@ bool BotClient::IsValid()
 
     if (!ProcUtil::ProcessExists(FlashPid()))
     {
-        fprintf(stderr, "[IsValid] Flash process not found, trying to refresh %d, %d\n", FlashPid(), Pid());
+        utils::log("[IsValid] Flash process not found, trying to refresh {}, {}\n", FlashPid(), Pid());
         Refresh();
         return false;
     }
@@ -1056,7 +1184,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
 
     if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
     {
-        fprintf(stderr, "[SendFlashCommand] Failed to get shared memory\n");
+        utils::log("[SendFlashCommand] Failed to get shared memory\n");
         return false;
     }
 
@@ -1064,7 +1192,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to attach shared memory to our process\n");
+            utils::log("[SendFlashCommand] Failed to attach shared memory to our process\n");
             return false;
         }
     }
@@ -1074,7 +1202,7 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
         if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
         {
             SetFlashPid(-1);
-            fprintf(stderr, "[SendFlashCommand] Failed to create semaphore");
+            utils::log("[SendFlashCommand] Failed to create semaphore\n");
             return false;
         }
     }
@@ -1092,11 +1220,11 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, notify timeout\n");
+            utils::log("[SendFlashCommand] Failed to send command to flash, notify timeout\n");
         }
         else
         {
-            perror("[SendFlashCommand] semop failed");
+            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
         }
         success = false;
     }
@@ -1106,11 +1234,11 @@ bool BotClient::SendFlashCommand(Message *message, Message *response)
     {
         if (errno == EAGAIN)
         {
-            fprintf(stderr, "[SendFlashCommand] Failed to send command to flash, wait timeout\n");
+            utils::log("[SendFlashCommand] Failed to send command to flash, wait timeout\n");
         }
         else
         {
-            perror("[SendFlashCommand] semop failed");
+            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
         }
         success = false;
     }

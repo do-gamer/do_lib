@@ -9,6 +9,10 @@
 
 static BotClient client;
 
+__attribute__((constructor)) static void lib_ctor()
+{
+    utils::log_timestamp_str(); // force timestamp init before any log call
+}
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setData
   (JNIEnv *env, jobject, jstring jurl, jstring jsid, jstring preloader, jstring vars)

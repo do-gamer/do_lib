@@ -7,7 +7,7 @@ add_library(${PROJECT_NAME} SHARED
     disassembler.cpp
     ipc.cpp
     darkorbit.cpp
-    memory_linux.cpp
+    memory.cpp
     avm.cpp
     singleton.cpp
     flash_stuff.cpp
