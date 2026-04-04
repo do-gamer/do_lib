@@ -25,13 +25,13 @@ void *dlopen(const char *filename, int flags)
 
 int __attribute__((constructor)) lib_ctor ()
 {
-    utils::log("[+] Loaded!\n");
+    utils::log("[+] Loading shared library do_lib\n");
     return 0;
 }
 
 int __attribute__((destructor)) lib_dtor()
 {
-    utils::log("[+] Unloading!\n");
+    utils::log("[+] Unloading shared library do_lib\n");
     Darkorbit::get().uninstall();
     flash_stuff::uninstall();
     return 0;
