@@ -45,6 +45,7 @@ namespace ProcUtil
     std::vector<MemPage> GetPages(pid_t pid, const std::string &name = "");
 
     uint64_t GetMemoryUsage(pid_t pid);
+    double GetCpuUsage(pid_t pid);
 
     class Process
     {

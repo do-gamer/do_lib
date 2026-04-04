@@ -74,6 +74,7 @@ Your DarkBot base must be:
 - Latest changes from: <https://github.com/darkbot-reloaded/DarkBot>
 - Including PR: <https://github.com/darkbot-reloaded/DarkBot/pull/449>
 - Including PR: <https://github.com/darkbot-reloaded/DarkBot/pull/448>
+- Including PR: <https://github.com/darkbot-reloaded/DarkBot/pull/453>
 
 After building, copy these files into your DarkBot `lib` directory:
 

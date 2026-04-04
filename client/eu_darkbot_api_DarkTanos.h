@@ -73,6 +73,14 @@ JNIEXPORT jlong JNICALL Java_eu_darkbot_api_DarkTanos_getMemoryUsage
 
 /*
  * Class:     eu_darkbot_api_DarkTanos
+ * Method:    getCpuUsage
+ * Signature: ()D
+ */
+JNIEXPORT jdouble JNICALL Java_eu_darkbot_api_DarkTanos_getCpuUsage
+  (JNIEnv *, jobject);
+
+/*
+ * Class:     eu_darkbot_api_DarkTanos
  * Method:    getVersion
  * Signature: ()I
  */

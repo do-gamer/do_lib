@@ -69,11 +69,15 @@ JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_isValid
 JNIEXPORT jlong JNICALL Java_eu_darkbot_api_DarkTanos_getMemoryUsage
   (JNIEnv *, jobject)
 {
-    if (client.FlashPid() > 0)
-    {
-        return ProcUtil::GetMemoryUsage(client.FlashPid()) / 1024;
-    }
-    return ProcUtil::GetMemoryUsage(client.Pid()) / 1024;
+    pid_t pid = client.FlashPid() > 0 ? client.FlashPid() : client.Pid();
+    return ProcUtil::GetMemoryUsage(pid) / 1024;
+}
+
+JNIEXPORT jdouble JNICALL Java_eu_darkbot_api_DarkTanos_getCpuUsage
+  (JNIEnv *, jobject)
+{
+    pid_t pid = client.FlashPid() > 0 ? client.FlashPid() : client.Pid();
+    return ProcUtil::GetCpuUsage(pid);
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_getVersion

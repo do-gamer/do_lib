@@ -2,10 +2,15 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <sstream>
+#include <unordered_map>
+
 
 #include <cstring>
 #include "masked_bmh.h"
 
+#include <fcntl.h>
+#include <time.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -134,28 +139,131 @@ std::vector<ProcUtil::MemPage> ProcUtil::GetPages(pid_t pid, const std::string &
 
 uint64_t ProcUtil::GetMemoryUsage(pid_t pid)
 {
-    if (std::ifstream fi { "/proc/"+std::to_string(pid)+"/stat" })
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+
+    char buf[512];
+    int fd = ::open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+
+    // Skip comm field (may contain spaces/parens): scan past last ')'
+    const char *rp = strrchr(buf, ')');
+    if (!rp || rp[1] == '\0') return 0;
+
+    char state;
+    int ppid, pgrp, session, tty_nr, tpgid;
+    unsigned int flags;
+    unsigned long minflt, cminflt, majflt, cmajflt, utime, stime;
+    long cutime, cstime, priority, nice, num_threads, itrealvalue;
+    unsigned long long starttime;
+    unsigned long vsize;
+    long rss;
+
+    if (sscanf(rp + 2,
+               "%c %d %d %d %d %d %u "
+               "%lu %lu %lu %lu %lu %lu %ld %ld "
+               "%ld %ld %ld %ld %llu "
+               "%lu %ld",
+               &state, &ppid, &pgrp, &session, &tty_nr, &tpgid, &flags,
+               &minflt, &cminflt, &majflt, &cmajflt, &utime, &stime,
+               &cutime, &cstime,
+               &priority, &nice, &num_threads, &itrealvalue,
+               &starttime,
+               &vsize, &rss) != 22)
+        return 0;
+
+    const long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;
+    return static_cast<uint64_t>(rss) * static_cast<uint64_t>(page_size_kb);
+}
+
+double ProcUtil::GetCpuUsage(pid_t pid)
+{
+    struct CpuStat {
+        uint64_t proc_ticks = 0;
+        uint64_t start_time = 0;
+        uint64_t last_ms    = 0;
+        double   cached     = 0.0;
+    };
+    static thread_local std::unordered_map<pid_t, CpuStat> prev;
+    static const double   clk_tck   = static_cast<double>(sysconf(_SC_CLK_TCK));
+
+    auto &p = prev[pid];
+
+    // Fast-path: vDSO monotonic clock check before any /proc I/O.
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint64_t now_ms = static_cast<uint64_t>(now.tv_sec) * 1000u
+                          + static_cast<uint64_t>(now.tv_nsec) / 1'000'000u;
+    const uint64_t elapsed_ms = now_ms - p.last_ms;
+    if (elapsed_ms < 250u)
+        return p.cached;
+
+    // Denominator expressed in jiffies from elapsed wall time.
+    const double total_delta = static_cast<double>(elapsed_ms) * clk_tck / 1000.0;
+
+    // --- Read /proc/<pid>/stat ---
+    uint64_t proc_ticks = 0;
+    uint64_t start_time = 0;
     {
-        std::string _pid, comm, state, ppid, pgrp, session, tty_nr;
-        std::string tpgid, flags, minflt, cminflt, majflt, cmajflt;
-        std::string utime, stime, cutime, cstime, priority, nice;
-        std::string O, itrealvalue, starttime;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
-        // the two fields we want
-        uint64_t vsize;
-        int64_t rss;
+        char buf[512];
+        int fd = ::open(path, O_RDONLY);
+        if (fd < 0) return p.cached;
+        ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+        ::close(fd);
+        if (n <= 0) return p.cached;
+        buf[n] = '\0';
 
-        fi >> _pid >> comm >> state >> ppid >> pgrp >> session >> tty_nr
-                    >> tpgid >> flags >> minflt >> cminflt >> majflt >> cmajflt
-                    >> utime >> stime >> cutime >> cstime >> priority >> nice
-                    >> O >> itrealvalue >> starttime >> vsize >> rss; // don't care about the rest
+        // Skip over comm field which may contain spaces: find last ')'
+        const char *rp = strrchr(buf, ')');
+        if (!rp || rp[1] == '\0') return p.cached;
 
-        int64_t page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024; // in case x86-64 is configured to use 2MB pages
-        auto vm_usage     = vsize / 1024;
-        auto resident_set = rss * page_size_kb;
-        return resident_set;
+        char state;
+        int ppid, pgrp, session, tty_nr, tpgid;
+        unsigned int flags;
+        unsigned long minflt, cminflt, majflt, cmajflt, utime, stime;
+        long cutime, cstime, priority, nice, num_threads, itrealvalue;
+        unsigned long long starttime;
+
+        if (sscanf(rp + 2,
+                   "%c %d %d %d %d %d %u "
+                   "%lu %lu %lu %lu %lu %lu %ld %ld "
+                   "%ld %ld %ld %ld %llu",
+                   &state, &ppid, &pgrp, &session, &tty_nr, &tpgid, &flags,
+                   &minflt, &cminflt, &majflt, &cmajflt, &utime, &stime,
+                   &cutime, &cstime,
+                   &priority, &nice, &num_threads, &itrealvalue,
+                   &starttime) != 20)
+            return p.cached;
+
+        proc_ticks = utime + stime;
+        start_time = starttime;
     }
-    return 0;
+
+    p.last_ms = now_ms;
+
+    if (p.last_ms > 0 && p.start_time == start_time)
+    {
+        const double proc_delta = static_cast<double>(proc_ticks - p.proc_ticks);
+        const double current    = (proc_delta / total_delta) * 100.0;
+        constexpr double alpha  = 0.35;
+        p.cached = p.cached * (1.0 - alpha) + current * alpha;
+    }
+    else
+    {
+        // Reset baseline when a PID is reused or on the first sample.
+        p.cached = 0.0;
+    }
+
+    p.proc_ticks = proc_ticks;
+    p.start_time = start_time;
+    return p.cached;
 }
 
 int ProcUtil::QueryMemory(pid_t pid, unsigned char *query, const char *mask, uintptr_t *out, uint32_t amount)
