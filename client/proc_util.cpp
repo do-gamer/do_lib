@@ -188,41 +188,55 @@ double ProcUtil::GetCpuUsage(pid_t pid)
         uint64_t last_ms    = 0;
         double   cached     = 0.0;
     };
+
     static thread_local std::unordered_map<pid_t, CpuStat> prev;
-    static const double   clk_tck   = static_cast<double>(sysconf(_SC_CLK_TCK));
+
+    static const double clk_tck = static_cast<double>(sysconf(_SC_CLK_TCK));
+    static const double nproc   = static_cast<double>(sysconf(_SC_NPROCESSORS_ONLN));
 
     auto &p = prev[pid];
 
-    // Fast-path: vDSO monotonic clock check before any /proc I/O.
+    // --- Time ---
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    const uint64_t now_ms = static_cast<uint64_t>(now.tv_sec) * 1000u
-                          + static_cast<uint64_t>(now.tv_nsec) / 1'000'000u;
+
+    const uint64_t now_ms =
+        static_cast<uint64_t>(now.tv_sec) * 1000ull +
+        static_cast<uint64_t>(now.tv_nsec) / 1'000'000ull;
+
     const uint64_t elapsed_ms = now_ms - p.last_ms;
+
     if (elapsed_ms < 250u)
         return p.cached;
 
-    // Denominator expressed in jiffies from elapsed wall time.
     const double total_delta = static_cast<double>(elapsed_ms) * clk_tck / 1000.0;
+    if (total_delta <= 0.0)
+        return p.cached;
 
     // --- Read /proc/<pid>/stat ---
     uint64_t proc_ticks = 0;
     uint64_t start_time = 0;
+
     {
         char path[64];
         snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
-        char buf[512];
+        char buf[1024]; // safer buffer
         int fd = ::open(path, O_RDONLY);
-        if (fd < 0) return p.cached;
+        if (fd < 0)
+            return p.cached;
+
         ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
         ::close(fd);
-        if (n <= 0) return p.cached;
+
+        if (n <= 0)
+            return p.cached;
+
         buf[n] = '\0';
 
-        // Skip over comm field which may contain spaces: find last ')'
         const char *rp = strrchr(buf, ')');
-        if (!rp || rp[1] == '\0') return p.cached;
+        if (!rp || rp[1] == '\0')
+            return p.cached;
 
         char state;
         int ppid, pgrp, session, tty_nr, tpgid;
@@ -236,33 +250,39 @@ double ProcUtil::GetCpuUsage(pid_t pid)
                    "%lu %lu %lu %lu %lu %lu %ld %ld "
                    "%ld %ld %ld %ld %llu",
                    &state, &ppid, &pgrp, &session, &tty_nr, &tpgid, &flags,
-                   &minflt, &cminflt, &majflt, &cmajflt, &utime, &stime,
-                   &cutime, &cstime,
+                   &minflt, &cminflt, &majflt, &cmajflt,
+                   &utime, &stime, &cutime, &cstime,
                    &priority, &nice, &num_threads, &itrealvalue,
                    &starttime) != 20)
+        {
             return p.cached;
+        }
 
-        proc_ticks = utime + stime;
+        proc_ticks = utime + stime + cutime + cstime; // include children
         start_time = starttime;
     }
 
     p.last_ms = now_ms;
 
-    if (p.last_ms > 0 && p.start_time == start_time)
+    // --- Compute usage ---
+    if (p.proc_ticks > 0 && p.start_time == start_time)
     {
         const double proc_delta = static_cast<double>(proc_ticks - p.proc_ticks);
-        const double current    = (proc_delta / total_delta) * 100.0;
-        constexpr double alpha  = 0.35;
+
+        // Normalized CPU usage (max = 100%)
+        const double current = (proc_delta / total_delta) * 100.0 / nproc;
+
+        constexpr double alpha = 0.35;
         p.cached = p.cached * (1.0 - alpha) + current * alpha;
     }
     else
     {
-        // Reset baseline when a PID is reused or on the first sample.
         p.cached = 0.0;
     }
 
     p.proc_ticks = proc_ticks;
     p.start_time = start_time;
+
     return p.cached;
 }
 

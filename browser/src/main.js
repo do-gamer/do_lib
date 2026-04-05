@@ -77,7 +77,7 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
             show: false,
             darkTheme: true,
             autoHideMenuBar: true,
-            title: "DarkBot Browser" + (apiVersion ? ` (Tanos v${apiVersion})` : ""),
+            title: "DarkBot Browser" + (apiVersion ? ` [Tanos v${apiVersion}]` : ""),
             webPreferences: {
                 plugins: true,
                 sandbox: false,
@@ -132,14 +132,17 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
     return window;
 }
 
-app.whenReady().then(() => {
+function createMainWindow() {
     const {url, sid, apiVersion, launchGame} = parseArgv();
-    mainWindow = createWindow(url, sid, apiVersion, launchGame)
+    mainWindow = createWindow(url, sid, apiVersion, launchGame);
+}
+
+app.whenReady().then(() => {
+    createMainWindow();
 
     app.on('activate', function () {
         if (BrowserWindow.getAllWindows().length === 0) {
-            const {url, sid, apiVersion, launchGame} = parseArgv();
-            mainWindow = createWindow(url, sid, apiVersion, launchGame)
+            createMainWindow();
         }
     })
 })
@@ -150,22 +153,29 @@ app.on('window-all-closed', function () {
 
 function parseArgv() {
     let url, sid, apiVersion, launchGame = false
-    for (let i = 0; i < process.argv.length; i++) {
-        switch (process.argv[i]) {
+
+    for (let i = 1; i < process.argv.length; i++) {
+        const arg = process.argv[i]
+
+        if (arg === '--launch') {
+            launchGame = true
+            continue
+        }
+
+        const [key, value] = arg.split('=', 2)
+        switch (key) {
             case '--url':
-                url = process.argv[++i]
+                url = value
                 break
             case '--sid':
-                sid = process.argv[++i]
-                break;
+                sid = value
+                break
             case '--api-version':
-                apiVersion = process.argv[++i]
-                break;
-            case '--launch':
-                launchGame = true
-                break;
+                apiVersion = value
+                break
         }
     }
+
     return {url, sid, apiVersion, launchGame};
 }
 
