@@ -1,6 +1,6 @@
 {
   "name": "darkbot_browser",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DarkBot Browser",
   "main": "src/main.js",
   "scripts": {
