@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <vector>
 #include <sstream>
+#include <string_view>
 
 #include "utils.h"
 #include "proc_util.h"
@@ -744,26 +745,53 @@ union Message
 
 BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
+/**
+ * Continuously reads from the browser process's log output pipe 
+ * and logs any lines that contain the "[browser]" tag.
+ */
 static void browser_log_drain(int read_fd)
 {
+    static constexpr std::string_view browser_tag = "[browser]";
     char buf[4096];
     std::string partial;
+
     while (true)
     {
-        ssize_t n = read(read_fd, buf, sizeof(buf) - 1);
-        if (n <= 0)
+        ssize_t n = read(read_fd, buf, sizeof(buf));
+        if (n == 0)
             break;
-        buf[n] = '\0';
-        partial.append(buf, static_cast<size_t>(n));
-        size_t pos;
-        while ((pos = partial.find('\n')) != std::string::npos)
+
+        if (n < 0)
         {
-            std::string line = partial.substr(0, pos);
-            partial.erase(0, pos + 1);
-            if (line.find("[browser]") != std::string::npos)
-                utils::log("{}\n", line.c_str());
+            if (errno == EINTR)
+                continue;
+            break;
         }
+
+        partial.append(buf, static_cast<size_t>(n));
+
+        size_t scan_start = 0;
+        size_t newline_pos = 0;
+        while ((newline_pos = partial.find('\n', scan_start)) != std::string::npos)
+        {
+            const std::string_view line(partial.data() + scan_start, newline_pos - scan_start);
+            if (line.find(browser_tag) != std::string_view::npos)
+                utils::log("{}\n", line);
+
+            scan_start = newline_pos + 1;
+        }
+
+        if (scan_start > 0)
+            partial.erase(0, scan_start);
     }
+
+    if (!partial.empty())
+    {
+        std::string_view tail(partial.data(), partial.size());
+        if (tail.find(browser_tag) != std::string_view::npos)
+            utils::log("{}\n", tail);
+    }
+
     close(read_fd);
 }
 
