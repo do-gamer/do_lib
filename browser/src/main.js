@@ -77,7 +77,7 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
             show: false,
             darkTheme: true,
             autoHideMenuBar: true,
-            title: "DarkBot Browser" + (apiVersion ? ` (Tanos v${apiVersion})` : ""),
+            title: "DarkBot Browser" + (apiVersion ? ` [Tanos v${apiVersion}]` : ""),
             webPreferences: {
                 plugins: true,
                 sandbox: false,
