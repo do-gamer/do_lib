@@ -948,12 +948,16 @@ void BotClient::LaunchBrowser()
                 sid.replace(0, 6, "");
             }
 
+            std::string arg_sid = std::string("--sid=") + sid;
+            std::string arg_url = std::string("--url=") + url;
+            std::string arg_api_version = std::string("--api-version=") + std::to_string(API_VERSION);
+
             execle(
                 fpath,
                 fpath,
-                "--sid", sid.c_str(),
-                "--url", url.c_str(),
-                "--api-version", std::to_string(API_VERSION).c_str(),
+                arg_sid.c_str(),
+                arg_url.c_str(),
+                arg_api_version.c_str(),
                 "--launch",
                 "--ozone-platform=x11",
                 "--disable-background-timer-throttling",
