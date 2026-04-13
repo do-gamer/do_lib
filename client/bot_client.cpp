@@ -1512,6 +1512,8 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
                 // unsupported message, ignore
                 break;
         }
+        // small delay between actions
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
 }
 
