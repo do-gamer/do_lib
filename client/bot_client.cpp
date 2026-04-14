@@ -1345,7 +1345,7 @@ uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector
 /**
  * Sends a key click event to the flash process via shared memory and semaphores.
  *
- * Note: works a bit better than sending command to the browser.
+ * Note: may not work properly for some game actions.
  */
 bool BotClient::KeyClickLegacy(uint32_t key)
 {
@@ -1357,12 +1357,12 @@ bool BotClient::KeyClickLegacy(uint32_t key)
 
 void BotClient::KeyClick(uint32_t key)
 {
-    // First try sending key click via legacy flash IPC method (works a bit better).
-    bool success = KeyClickLegacy(key);
+    // First try sending key click via browser command
+    bool success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
 
-    // If failed, then send via browser command
+    // If failed, then send via legacy flash IPC method
     if (!success)
-        success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
+        success = KeyClickLegacy(key);
 }
 
 void BotClient::KeyDown(uint32_t key)
@@ -1459,11 +1459,12 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
 
-    for (uint64_t value : actions)
+    for (size_t i = 0; i < actions.size(); ++i)
     {
         if (std::chrono::steady_clock::now() >= deadline)
             break;
 
+        uint64_t value = actions[i];
         uint16_t message = static_cast<uint16_t>((value >> 48) & 0x7fff);
         int16_t wparam = static_cast<int16_t>((value >> 32) & 0xffff);
         int16_t lparam_low = static_cast<int16_t>(value & 0xffff);
@@ -1512,6 +1513,9 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
                 // unsupported message, ignore
                 break;
         }
+        // small delay between actions
+        if (i < actions.size() - 1)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 

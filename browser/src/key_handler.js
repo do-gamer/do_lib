@@ -32,26 +32,6 @@ const specialKeys = {
     92: 'Meta',       // Right Windows / Command
     93: 'ContextMenu',
 
-    // Numpad digits
-    96: 'Numpad0',
-    97: 'Numpad1',
-    98: 'Numpad2',
-    99: 'Numpad3',
-    100: 'Numpad4',
-    101: 'Numpad5',
-    102: 'Numpad6',
-    103: 'Numpad7',
-    104: 'Numpad8',
-    105: 'Numpad9',
-
-    // Numpad operations
-    106: 'NumpadMultiply',
-    107: 'NumpadAdd',
-    109: 'NumpadSubtract',
-    110: 'NumpadDecimal',
-    111: 'NumpadDivide',
-    108: 'NumpadEnter',
-
     // Function keys
     112: 'F1',
     113: 'F2',
@@ -69,6 +49,31 @@ const specialKeys = {
     // Lock keys
     144: 'NumLock',
     145: 'ScrollLock'
+};
+
+// VK codes 96–111 are the numpad range; sendInputEvent needs the isKeypad modifier
+// so Chromium routes them to VK_NUMPAD0-9 / VK_ADD / VK_SUBTRACT etc. instead of
+// their non-numpad equivalents (VK_0 / VK_OEM_PLUS / VK_OEM_MINUS, etc.)
+const numpadCodes = {
+    // Digits
+    96: '0',
+    97: '1',
+    98: '2',
+    99: '3',
+    100: '4',
+    101: '5',
+    102: '6',
+    103: '7',
+    104: '8',
+    105: '9',
+
+    // Operations
+    106: '*',
+    107: '+',
+    108: 'Enter',
+    109: '-',
+    110: '.',
+    111: '/'
 };
 
 const oemKeys = {
@@ -89,10 +94,18 @@ const oemKeys = {
  * Resolves a numeric key code to an Electron key string.
  */
 function resolveKey(code) {
-    if (specialKeys[code]) return specialKeys[code];
-    if (oemKeys[code]) return oemKeys[code];
+    if (code in specialKeys) return specialKeys[code];
+    if (code in numpadCodes) return numpadCodes[code];
+    if (code in oemKeys) return oemKeys[code];
 
     return String.fromCharCode(code);
+}
+
+/**
+ * Returns the Electron input event modifiers for a given key code.
+ */
+function getModifiers(code) {
+    return code in numpadCodes ? ['isKeypad'] : [];
 }
 
 /**
@@ -104,12 +117,13 @@ function dispatchKeyEvent(webContents, code, press, release) {
     }
 
     const keyCode = resolveKey(code);
+    const modifiers = getModifiers(code);
 
     if (press) {
-        webContents.sendInputEvent({ type: 'keyDown', keyCode });
+        webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
     }
     if (release) {
-        webContents.sendInputEvent({ type: 'keyUp', keyCode });
+        webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
     }
 }
 
