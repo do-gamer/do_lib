@@ -89,7 +89,8 @@ JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_getVersion
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_keyClick
   (JNIEnv *, jobject, jint c)
 {
-    client.KeyClick(c);
+    // Use legacy flash key click path for basic actions like attack, jump, and other simple keys.
+    client.KeyClickLegacy(c);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
