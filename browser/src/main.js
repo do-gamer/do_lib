@@ -103,7 +103,7 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
         delay: 0
     })
 
-    window.webContents.userAgent = 'BigpointClient/1.6.7'
+    window.webContents.userAgent = 'BigpointClient/1.6.9'
     window.webContents.on('new-window', (event, url) => {
         event.preventDefault()
         window.loadURL(url)
