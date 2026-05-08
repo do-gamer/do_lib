@@ -113,6 +113,10 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
         evt.preventDefault();
     });
 
+    window.on('close', (event) => {
+        event.preventDefault();
+    });
+
     window.webContents.on('before-input-event', (event, input) => {
         let focus = () => BrowserWindow.getFocusedWindow();
 
