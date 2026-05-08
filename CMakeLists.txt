@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project (DarkTanos)
 
-set(API_VERSION 10)
+set(API_VERSION 11)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE Debug)
