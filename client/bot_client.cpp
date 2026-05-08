@@ -888,9 +888,13 @@ void BotClient::Refresh()
 
     if (!SendBrowserCommand("refresh"))
     {
-        utils::log("[Refresh] refresh command failed\n");
-        // Reset IPC so we can attempt to reconnect
+        utils::log("[Refresh] refresh command failed, restarting browser\n");
+        if (Pid() > 0)
+            kill(Pid(), SIGKILL);
+        SetPid(-1);
         m_browser_ipc.reset(new SockIpc());
+        LaunchBrowser();
+        reset();
         return;
     }
 
