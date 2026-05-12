@@ -113,6 +113,11 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
         evt.preventDefault();
     });
 
+    window.on('minimize', (event) => {
+        event.preventDefault();
+        window.restore();
+    });
+
     window.on('close', (event) => {
         event.preventDefault();
     });
