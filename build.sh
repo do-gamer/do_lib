@@ -8,6 +8,9 @@ cd ${RUN_PATH}
 
 BROWSER_DIR="./browser"
 BUILD_DIR="./build"
+# Docker builds use their own directory: a CMake cache can't be shared between the container
+# and the host (or tools like VS Code that configure ./build); results are copied to ./build.
+DOCKER_BUILD_DIR="./build-docker"
 CLIENT_LIB_DIR="$BUILD_DIR/client"
 DO_LIB_DIR="$BUILD_DIR/do_lib"
 
@@ -51,9 +54,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Configure and compile the native libraries into $BUILD_DIR.
+# Configure and compile the native libraries into the given build directory.
 build_native() {
     local toolchain="$1"
+    local BUILD_DIR="$2"
 
     # never mix objects produced by different toolchains (host vs container)
     if [[ -f "$BUILD_DIR/CMakeCache.txt" && "$(cat "$BUILD_DIR/.toolchain" 2>/dev/null)" != "$toolchain" ]]; then
@@ -74,14 +78,14 @@ build_native() {
 
 # Inside the container only the native libraries are built (called by -d).
 if [[ "$IN_CONTAINER" == "true" ]]; then
-    build_native "docker-ubuntu20.04"
+    build_native "docker-ubuntu20.04" "$DOCKER_BUILD_DIR"
     exit 0
 fi
 
 # Perform clean if requested
 if [[ "$CLEAN" == "true" ]]; then
-    echo "Cleaning $BUILD_DIR directory..."
-    rm -rf "$BUILD_DIR"
+    echo "Cleaning $BUILD_DIR and $DOCKER_BUILD_DIR directories..."
+    rm -rf "$BUILD_DIR" "$DOCKER_BUILD_DIR"
     # also clean browser output if building browser
     if [[ "$BUILD_BROWSER" == "true" ]]; then
         echo "Cleaning $BROWSER_DIR/dist directory..."
@@ -127,8 +131,12 @@ if [[ "$DOCKER_BUILD" == "true" ]]; then
     # current user so build outputs aren't owned by root
     docker run --rm -u "$(id -u):$(id -g)" -v "$RUN_PATH:$RUN_PATH" -w "$RUN_PATH" \
         "$COMPAT_IMAGE" ./build.sh --in-container
+
+    mkdir -p "$CLIENT_LIB_DIR" "$DO_LIB_DIR"
+    cp "$DOCKER_BUILD_DIR/client/libDarkTanos.so" "$CLIENT_LIB_DIR/libDarkTanos.so"
+    cp "$DOCKER_BUILD_DIR/do_lib/libdo_lib.so" "$DO_LIB_DIR/libdo_lib.so"
 else
-    build_native "host"
+    build_native "host" "$BUILD_DIR"
 fi
 
 # Rename the client library to match what darkbot expects

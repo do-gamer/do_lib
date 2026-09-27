@@ -10,6 +10,8 @@ public:
 
     static bool install();
     static void uninstall();
+    // Whether the hooks are installed in this process (i.e. this is the flash process)
+    static bool installed();
 
     static void                 mouse_release(int x, int y, int button);
     static void                 mouse_press(int x, int y, int button);

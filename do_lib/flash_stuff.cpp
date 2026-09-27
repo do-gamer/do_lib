@@ -150,12 +150,19 @@ avm::MethodSignature *flash_stuff::get_method_signature(avm::MethodInfo *mi)
     return get_method_signature_f(mi);
 }
 
+// all hooks installed in this process
+static bool g_installed = false;
+
+bool flash_stuff::installed()
+{
+    return g_installed;
+}
+
 bool flash_stuff::install()
 {
     // dlopen may be called several times for the same library; hooking twice would make
     // the trampoline jump into our own hook forever
-    static bool installed = false;
-    if (installed)
+    if (g_installed)
         return true;
 
     uintptr_t base = 0;
@@ -204,7 +211,7 @@ bool flash_stuff::install()
         return false;
     }
 
-    installed = true;
+    g_installed = true;
     utils::log("[+] Flash hooks installed (trampolines: {}, {})\n",
                verify_jit_hook->GetTrampoline() != nullptr, free_chunk_hook->GetTrampoline() != nullptr);
     return true;

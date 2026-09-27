@@ -56,8 +56,12 @@ echo "RESULT shm_segments_leaked $(( $(ipcs -m | grep -c '^0x') - shm_before ))"
 echo "RESULT semaphores_leaked $(( $(ipcs -s | grep -c '^0x') - sem_before ))"
 echo "--- lib log (filtered)"
 echo "RESULT do_lib_hooks_installed $(grep -h 'Flash hooks installed' logs/*.log 2>/dev/null | wc -l)"
-grep -hE "\[\+\]|\[-\]|Flash hooks|trampolines|\[debug\]|extract-and-run|restarting|Flash\] found|FlashIpc|exited|killed by|Failed|failed|!" logs/*.log 2>/dev/null | sed -E 's/^\[[^]]+\] //' | sort | uniq -c | sort -rn | head -40
+grep -hE "Plugin crashed|stopped after refresh|Uninstalling|\[\+\]|\[-\]|Flash hooks|trampolines|\[debug\]|extract-and-run|restarting|Flash\] found|FlashIpc|exited|killed by|Failed|failed|!" logs/*.log 2>/dev/null | sed -E 's/^\[[^]]+\] //' | sort | uniq -c | sort -rn | head -40
 
+echo "--- browser log (filtered)"
+grep -hE "\[browser\]" logs/*.log 2>/dev/null | grep -vE "IPC server listening|Socket closed" | sed -E 's/^\[[^]]+\] //' | sort | uniq -c | sort -rn | head -15
+echo "RESULT do_lib_unloads $(cat logs/*.log 2>/dev/null | grep -c 'do_lib unloading')"
+echo "RESULT do_lib_uninstalls $(cat logs/*.log 2>/dev/null | grep -c 'Uninstalling')"
 echo "RESULT leftover_extracted_dirs $(ls -d /tmp/appimage_extracted_* 2>/dev/null | wc -l)"
 kill $WM $XVFB $SERVER 2>/dev/null
 pkill -9 -f '^(lib/darkbot_browser_linux|/tmp/(appimage_extracted_|\.mount_darkbo))' 2>/dev/null

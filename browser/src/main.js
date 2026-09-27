@@ -4,6 +4,9 @@ const fs = require('fs')
 const {initSplashScreen} = require("@trodi/electron-splashscreen")
 
 let mainWindow;
+// time of the last "refresh" command: the native client kills the old flash process right
+// after it for a faster reload, which Electron reports as a plugin crash
+let lastRefreshTime = 0;
 
 function log(...args) { console.log('[browser]', ...args); }
 
@@ -30,6 +33,7 @@ function handleCommand(obj) {
     switch (obj.cmd) {
         case "refresh":
             log("Received refresh command, reloading...");
+            lastRefreshTime = Date.now();
             mainWindow.reload();
             return true;
         case "setSize":
@@ -141,7 +145,11 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
     });
 
     window.webContents.on('plugin-crashed', (event, name, version) => {
-        log("Plugin crashed:", name, version);
+        // fires for any pepper plugin (Flash, but e.g. also Chromium's PDF viewer); right after a
+        // refresh it's expected (the client kills the old plugin process), so stay quiet then
+        if (Date.now() - lastRefreshTime >= 5000) {
+            log("Plugin crashed:", name, version);
+        }
     });
 
     window.on('unresponsive', () => log("Window unresponsive"));

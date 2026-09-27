@@ -1,5 +1,7 @@
 #include <dlfcn.h>
 #include <cstring>
+#include <cstdlib>
+#include <unistd.h>
 
 #include "utils.h"
 #include "flash_stuff.h"
@@ -25,16 +27,27 @@ extern "C" __attribute__((visibility("default"))) void *dlopen(const char *filen
     return r;
 }
 
+// Every browser process loads us; per-process load/unload lines only with TANOS_DEBUG=1
+static const bool g_debug = getenv("TANOS_DEBUG") != nullptr;
+
 int __attribute__((constructor)) lib_ctor ()
 {
-    utils::log("[+] Loading shared library do_lib\n");
+    if (g_debug)
+        utils::log("[debug] do_lib loaded (pid {})\n", getpid());
     return 0;
 }
 
 int __attribute__((destructor)) lib_dtor()
 {
-    utils::log("[+] Unloading shared library do_lib\n");
-    Darkorbit::get().uninstall();
-    flash_stuff::uninstall();
+    if (g_debug)
+        utils::log("[debug] do_lib unloading (pid {})\n", getpid());
+
+    // Only the flash process has hooks to restore; other browser processes (e.g. helpers
+    // exiting after startup) have nothing to uninstall
+    if (flash_stuff::installed())
+    {
+        Darkorbit::get().uninstall();
+        flash_stuff::uninstall();
+    }
     return 0;
 }
