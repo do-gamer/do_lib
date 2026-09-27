@@ -1,7 +1,9 @@
 #ifndef DARKORBIT_H
 #define DARKORBIT_H
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <future>
 #include <mutex>
@@ -90,6 +92,9 @@ public:
 
         MyInvoke_t handler;
 
+        // set by uninstall(); hook_proxy must not reinstall a removed hook
+        bool removed = false;
+
         void restore()
         {
             if (method)
@@ -125,7 +130,9 @@ public:
     avm::String *create_string(const std::string &s)
     {
         auto *r = flash_stuff::newstring(m_main->core(), s);
-        
+        if (!r)
+            return nullptr;
+
         /*
         r->composite |= 0x20000000; // Stack pin
         r->composite += 1; // Refcount
@@ -137,8 +144,6 @@ public:
         auto *gc = avm::get_block_header(r)->gc;
 
         gc->zct_bottom[r->zct_index()] = 0;
-
-        utils::log("[*] Created string at {x}\n", reinterpret_cast<uintptr_t>(r));
 
         return r;
     }
@@ -165,13 +170,18 @@ public:
 
     void notify_freechunk(uintptr_t chunk);
 
-    FlashHook &gethook(uint32_t id) { return m_hooks[id]; };
-
     auto &get_hooks() { return m_hooks; }
 
-    std::future<uintptr_t> call_sync(const std::function<uintptr_t()> &f);
+    // Queues f for the game thread and returns its future (invalid if it can't be queued).
+    // If *cancelled becomes true before the task runs, it's skipped.
+    std::future<uintptr_t> call_sync(std::function<uintptr_t()> f, std::shared_ptr<std::atomic<bool>> cancelled = nullptr);
 
-    void cleanup();
+    // Fire-and-forget variant, returns false if the task couldn't be queued.
+    bool post_async(std::function<uintptr_t()> f);
+
+    // Hook proxy reentrancy tracking, see hook_proxy()
+    void enter_proxy() { m_proxy_depth++; }
+    void leave_proxy();
 
     avm::BuiltinType inline get_builtin_type(avm::Traits *traits)
     {
@@ -181,6 +191,9 @@ public:
     int check_method_signature(avm::ScriptObject *obj, int methodIdx, bool methodName, const std::string &signature);
 
     std::string get_method_signature(avm::MethodInfo *mi, bool method_name);
+
+    // IPC request handler, runs on the ipc thread (see ipc_handler.cpp)
+    flash_ipc::ResultCode handle_ipc_message(flash_ipc::Message &msg);
 
 
 
@@ -193,15 +206,18 @@ private:
 
     void handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv) ;
 
-
+    // Max tasks waiting for the game thread; protects against unbounded growth when it stalls.
+    static constexpr size_t MAX_PENDING_CALLS = 1024;
 
     std::unordered_map<uint32_t, FlashHook> m_hooks;
+    int m_proxy_depth = 0;
+    bool m_clear_hooks_pending = false;
 
     std::mutex m_call_mut;
     std::vector<std::packaged_task<uintptr_t()>> m_async_calls;
 
     Ipc m_ipc;
-    bool m_installed = false;
+    std::atomic<bool> m_installed { false };
 
     uint32_t m_refine_multiname = 0;
     uint32_t m_item_prop_mn = 0;

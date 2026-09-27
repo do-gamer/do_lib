@@ -10,34 +10,90 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <climits>
 #include <vector>
 #include <sstream>
 #include <string_view>
 
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+
 #include "utils.h"
 #include "proc_util.h"
 #include "sock_ipc.h"
-
-#include <signal.h>
-#include <sys/uio.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <sys/wait.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/X.h>
 #include <X11/extensions/shape.h>
 
+extern char **environ;
 
-#define MEM_SIZE 1024
+// close_range(2) exists since Linux 5.9; older headers don't define it. On older
+// kernels the call fails with ENOSYS and we fall back to closing descriptors in a loop.
+#ifndef SYS_close_range
+#define SYS_close_range 436
+#endif
+
+using flash_ipc::Message;
+using flash_ipc::MessageType;
+
+namespace
+{
+    constexpr const char *BROWSER_PATH = "lib/darkbot_browser_linux.AppImage";
+    constexpr const char *DO_LIB_PATH = "lib/libdo_lib.so";
+
+    // Don't relaunch a crashing browser more often than this.
+    constexpr uint64_t RELAUNCH_BACKOFF_MS = 10'000;
+    // Don't rescan /proc for the flash process more often than this.
+    constexpr uint64_t FLASH_SCAN_INTERVAL_MS = 500;
+    // Game thread not ticking for this long is reported as invalid, so the bot refreshes.
+    constexpr uint64_t FLASH_FROZEN_MS = 60'000;
+
+    // A browser younger than this is still starting (AppImage mount/extraction, window).
+    constexpr uint64_t BROWSER_STARTUP_MS = 60'000;
+
+    constexpr int BROWSER_SEND_TIMEOUT_MS = 250;
+    constexpr int BROWSER_ACK_TIMEOUT_MS = 1500;
+
+    inline uint64_t now_ms() { return flash_ipc::now_ms(); }
+
+    // Logs at most once per |interval_ms| for a given call site.
+    class RateLimit
+    {
+    public:
+        explicit RateLimit(uint64_t interval_ms) : m_interval(interval_ms) { }
+        bool Allow()
+        {
+            uint64_t now = now_ms();
+            uint64_t last = m_last.load(std::memory_order_relaxed);
+            if (last && now - last < m_interval)
+                return false;
+            return m_last.compare_exchange_strong(last, now);
+        }
+    private:
+        uint64_t m_interval;
+        std::atomic<uint64_t> m_last { 0 };
+    };
+}
 
 namespace window
 {
+    // One persistent X connection for all input/window operations. Opening a connection
+    // per event (as before) costs a socket connect + auth handshake every mouse action.
+    std::mutex x_mutex;
+    Display *x_display = nullptr;
+    std::atomic<Display *> marker_display { nullptr }; // cursor marker connection
     Window browser_window = 0;
+    std::atomic<XErrorHandler> previous_error_handler { nullptr };
+
+    Atom atom_pid = None, atom_client_list = None, atom_wm_state = None;
 
     struct Property
     {
@@ -49,6 +105,68 @@ namespace window
     };
 
     /**
+     * Ignores errors caused by our own requests (e.g. BadWindow when a window disappears
+     * while we query it) and chains everything else to the previous handler (AWT or Xlib's).
+     * Xlib's default handler calls exit(): without this a vanished window kills the JVM.
+     */
+    int error_handler(Display *display, XErrorEvent *event)
+    {
+        if (display == x_display || display == marker_display.load())
+            return 0;
+        XErrorHandler previous = previous_error_handler.load();
+        return previous ? previous(display, event) : 0;
+    }
+
+    /**
+     * The handler is process-global; AWT may install its own after us. Re-assert ours
+     * (a pointer swap, no X round trip), chaining to whatever was installed.
+     */
+    void ensure_error_handler()
+    {
+        XErrorHandler current = XSetErrorHandler(error_handler);
+        if (current != error_handler)
+            previous_error_handler = current;
+    }
+
+    /**
+     * Checks if X11 window control is available by verifying the DISPLAY environment variable.
+     */
+    bool x11_control_available()
+    {
+        const char *display = std::getenv("DISPLAY");
+        return display && *display;
+    }
+
+    Display *get_display()
+    {
+        if (x_display)
+            return x_display;
+
+        if (!x11_control_available())
+            return nullptr;
+
+        static RateLimit open_fail_log(30'000);
+        x_display = XOpenDisplay(nullptr);
+        if (!x_display)
+        {
+            if (open_fail_log.Allow())
+                utils::log("[X11] Failed to open display {}\n", std::getenv("DISPLAY"));
+            return nullptr;
+        }
+
+        atom_pid = XInternAtom(x_display, "_NET_WM_PID", False);
+        atom_client_list = XInternAtom(x_display, "_NET_CLIENT_LIST", False);
+        atom_wm_state = XInternAtom(x_display, "WM_STATE", False);
+        return x_display;
+    }
+
+    void reset_browser_window()
+    {
+        std::lock_guard<std::mutex> lock(x_mutex);
+        browser_window = 0;
+    }
+
+    /**
      * Helper function to free the memory allocated by XGetWindowProperty and reset the WindowProperty structure.
      */
     void free_property(Property &property)
@@ -57,11 +175,7 @@ namespace window
         {
             XFree(property.prop);
         }
-        property.actual_type = None;
-        property.actual_format = 0;
-        property.nitems = 0;
-        property.bytes_after = 0;
-        property.prop = nullptr;
+        property = Property {};
     }
 
     /**
@@ -94,16 +208,10 @@ namespace window
      */
     bool get_pid(Display *display, Window window, pid_t &pid)
     {
-        Atom atom_pid = XInternAtom(display, "_NET_WM_PID", True);
-        if (atom_pid == None)
-        {
-            return false;
-        }
-
         Property property;
         bool read_ok = get_property(display, window, atom_pid, XA_CARDINAL, 1, property);
 
-        if (!read_ok || !property.prop || property.nitems == 0)
+        if (!read_ok || !property.prop || property.nitems == 0 || property.actual_format != 32)
         {
             free_property(property);
             return false;
@@ -123,26 +231,11 @@ namespace window
     }
 
     /**
-     * Checks if X11 window control is available by verifying the DISPLAY environment variable.
-     */
-    bool x11_control_available()
-    {
-        const char *display = std::getenv("DISPLAY");
-        return display && *display;
-    }
-
-    /**
-     * Helper function to attempt to get window attributes, handling potential X11 errors gracefully.
+     * Helper function to attempt to get window attributes.
      */
     bool try_get_attrs(Display *display, Window window)
     {
         XWindowAttributes attrs;
-        if (XGetWindowAttributes(display, window, &attrs) != 0)
-        {
-            return true;
-        }
-
-        XSync(display, False);
         return XGetWindowAttributes(display, window, &attrs) != 0;
     }
 
@@ -190,9 +283,9 @@ namespace window
      * Recursive helper function to find any descendant window owned by the browser process,
      * in case the top-level window doesn't have a PID or isn't directly owned by the browser.
      */
-    Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid)
+    Window find_browser_owned_descendant_recursive(Display *display, Window root, pid_t browser_pid, int depth = 0)
     {
-        if (!root)
+        if (!root || depth > 32)
         {
             return 0;
         }
@@ -216,7 +309,7 @@ namespace window
         Window found = 0;
         for (unsigned int i = 0; i < nchildren && !found; i++)
         {
-            found = find_browser_owned_descendant_recursive(display, children[i], browser_pid);
+            found = find_browser_owned_descendant_recursive(display, children[i], browser_pid, depth + 1);
         }
 
         if (children)
@@ -232,7 +325,6 @@ namespace window
     Window find_browser_client(Display *display, pid_t browser_pid)
     {
         Window root = DefaultRootWindow(display);
-        Atom atom_client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
         if (atom_client_list != None)
         {
             Property property;
@@ -252,8 +344,9 @@ namespace window
 
                     if (owner_pid == browser_pid)
                     {
+                        Window found = windows[i];
                         free_property(property);
-                        return windows[i];
+                        return found;
                     }
 
                     if (!child_fallback && ProcUtil::IsChildOf(owner_pid, browser_pid))
@@ -287,15 +380,14 @@ namespace window
      */
     bool has_wm_state(Display *display, Window window)
     {
-        Atom wm_state = XInternAtom(display, "WM_STATE", True);
-        if (wm_state == None)
+        if (atom_wm_state == None)
         {
             return false;
         }
 
         Property property;
-        bool read_ok = get_property(display, window, wm_state, wm_state, 2, property);
-        bool has_state = read_ok && property.actual_type == wm_state && property.nitems > 0;
+        bool read_ok = get_property(display, window, atom_wm_state, atom_wm_state, 2, property);
+        bool has_state = read_ok && property.actual_type == atom_wm_state && property.nitems > 0;
 
         free_property(property);
         return has_state;
@@ -307,7 +399,7 @@ namespace window
      */
     Window resolve_client(Display *display, pid_t browser_pid)
     {
-        if (!display)
+        if (!display || browser_pid <= 0)
         {
             return 0;
         }
@@ -357,12 +449,16 @@ namespace window
     template<typename Func>
     bool with_browser(int flash_pid, int browser_pid, Func&& action)
     {
-        if (flash_pid == -1 || !x11_control_available())
+        if (flash_pid <= 0 || browser_pid <= 0)
             return false;
 
-        Display *display = XOpenDisplay(nullptr);
+        std::lock_guard<std::mutex> lock(x_mutex);
+
+        Display *display = get_display();
         if (!display)
             return false;
+
+        ensure_error_handler();
 
         if (!browser_window || !try_get_attrs(display, browser_window))
             browser_window = resolve_client(display, browser_pid);
@@ -372,7 +468,6 @@ namespace window
             result = action(display, browser_window);
 
         XFlush(display);
-        XCloseDisplay(display);
         return result;
     }
 }
@@ -419,9 +514,13 @@ namespace mouse
         if (attrs.height > 0 && ctx.local_y >= attrs.height)
             ctx.local_y = attrs.height - 1;
 
-        ctx.root = DefaultRootWindow(display);
+        ctx.root = attrs.root;
         Window child = 0;
-        XTranslateCoordinates(display, window, ctx.root, 0, 0, &ctx.root_x, &ctx.root_y, &child);
+        if (!XTranslateCoordinates(display, window, ctx.root, 0, 0, &ctx.root_x, &ctx.root_y, &child))
+        {
+            ctx.root_x = attrs.x;
+            ctx.root_y = attrs.y;
+        }
 
         return true;
     }
@@ -458,8 +557,7 @@ namespace mouse
         fill_event_common(event, ctx);
         event.type = MotionNotify;
 
-        XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event);
-        return true;
+        return XSendEvent(ctx.display, ctx.window, True, PointerMotionMask, &event) != 0;
     }
 
     /**
@@ -475,18 +573,19 @@ namespace mouse
         fill_event_common(event, ctx);
         event.xbutton.button = button;
 
+        bool ok = true;
         if (press)
         {
             event.type = ButtonPress;
-            XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event);
+            ok &= XSendEvent(ctx.display, ctx.window, True, ButtonPressMask, &event) != 0;
         }
 
         if (release)
         {
             event.type = ButtonRelease;
-            XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event);
+            ok &= XSendEvent(ctx.display, ctx.window, True, ButtonReleaseMask, &event) != 0;
         }
-        return true;
+        return ok;
     }
 
     /**
@@ -506,25 +605,28 @@ namespace cursor_marker
     // State for the cursor marker, including whether it's enabled.
     struct State
     {
-        bool enabled = false;
+        std::atomic<bool> enabled { false };
         Display *display = nullptr;
         Window window = 0;
         Window parent = 0;
         std::chrono::steady_clock::time_point last_time;
+        std::atomic<bool> clear_scheduled { false };
         std::mutex mutex;
     };
 
     static State state;
 
     /**
-     * Destroys the cursor marker window and closes the display connection.
+     * Destroys the cursor marker window and closes the display connection. Requires state.mutex.
      */
     void destroy()
     {
-        if (state.window && state.display)
+        if (state.display)
         {
-            XDestroyWindow(state.display, state.window);
+            if (state.window)
+                XDestroyWindow(state.display, state.window);
             XCloseDisplay(state.display);
+            window::marker_display = nullptr;
         }
         state.window = 0;
         state.parent = 0;
@@ -534,6 +636,7 @@ namespace cursor_marker
     /**
      * Creates a small red window that will serve as a marker for the virtual cursor position.
      * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
+     * Requires state.mutex.
      */
     void create(Window parent)
     {
@@ -545,6 +648,7 @@ namespace cursor_marker
         state.display = XOpenDisplay(NULL);
         if (!state.display)
             return;
+        window::marker_display = state.display;
 
         int scr = DefaultScreen(state.display);
 
@@ -592,19 +696,27 @@ namespace cursor_marker
     }
 
     /**
-     * Checks if the cursor marker should be hidden due to inactivity (no updates for 3 seconds) and hides it if necessary.
+     * Hides the cursor marker after 3 seconds without updates. A single checker thread is
+     * kept alive while updates keep coming instead of spawning one thread per mouse event.
      */
-    void maybe_clear()
+    void schedule_clear()
     {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        if (!state.enabled)
+        if (state.clear_scheduled.exchange(true))
             return;
 
-        auto now = std::chrono::steady_clock::now();
-        if (now - state.last_time >= std::chrono::seconds(3))
-        {
-            destroy();
-        }
+        std::thread([]() {
+            while (true)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::lock_guard<std::mutex> lock(state.mutex);
+                if (!state.enabled || std::chrono::steady_clock::now() - state.last_time >= std::chrono::seconds(3))
+                {
+                    destroy();
+                    state.clear_scheduled = false;
+                    return;
+                }
+            }
+        }).detach();
     }
 
     /**
@@ -612,141 +724,47 @@ namespace cursor_marker
      */
     void update(int x, int y, int flash_pid, int browser_pid)
     {
-        if (!state.enabled || flash_pid == -1 || !window::x11_control_available())
+        if (!state.enabled || flash_pid <= 0 || !window::x11_control_available())
             return;
 
-        // record last update time
-        {
+        window::with_browser(flash_pid, browser_pid, [&](Display *, Window browser) {
             std::lock_guard<std::mutex> lock(state.mutex);
             state.last_time = std::chrono::steady_clock::now();
-        }
 
-        window::with_browser(flash_pid, browser_pid, [&](Display *display, Window browser) {
-            if (!state.window || !state.display || state.parent != browser || !window::try_get_attrs(state.display, state.window))
+            if (!state.window || !state.display || state.parent != browser)
                 create(browser);
 
             if (!state.window || !state.display)
                 return false;
 
-            const int offset = static_cast<int>(std::lround(dot_size / 2.0));
+            const int offset = dot_size / 2;
             XMoveWindow(state.display, state.window, x - offset, y - offset);
             XMapRaised(state.display, state.window);
             XFlush(state.display);
             return true;
         });
 
-        // schedule a hide check in 3 seconds
-        std::thread([]() {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-            maybe_clear();
-        }).detach();
+        schedule_clear();
     }
 }
 
-
-enum class MessageType
-{
-    CALL,
-    RESULT,
-    SEND_NOTIFICATION,
-    REFINE,
-    UPGRADE,
-    USE_ITEM,
-    KEY_CLICK,
-    MOUSE_CLICK,
-    CHECK_SIGNATURE,
-
-    NONE
-};
-
-struct RefineMessage
-{
-    MessageType type = MessageType::REFINE;
-    uintptr_t refine_util;
-    int ore, amount;
-};
-
-struct SendNotificationMessage
-{
-    MessageType type = MessageType::SEND_NOTIFICATION;
-    char name[64];
-    uint32_t argc;
-    uintptr_t argv[64];
-};
-
-struct FunctionResultMessage
-{
-    MessageType type = MessageType::RESULT;
-    bool error = false;
-    uintptr_t value;
-};
-
-struct CallFunctionMessage
-{
-    MessageType type = MessageType::CALL;;
-    uintptr_t object;
-    uint32_t index;
-    int argc;
-    uintptr_t argv[64];
-};
-
-struct UseItemMessage
-{
-    MessageType type = MessageType::USE_ITEM;
-    char name[64];
-    uint8_t action_type;
-    bool action_bar;
-
-    // ItemsControlMenuConstants.ACTION_SELECTION == 1
-    // ItemsControlMenuConstants.ACTION_TOOGLE == 0
-    // ItemsControlMenuConstants.ACTION_ONE_SHOT == 1
-    // barId = _loc2_.barId == CATEGORY_BAR ? 0 : 1;
-
-};
-
-struct KeyClickMessage
-{
-    MessageType type = MessageType::KEY_CLICK;
-    uint32_t key;
-};
-
-struct MouseClickMessage
-{
-    MessageType type = MessageType::MOUSE_CLICK;
-    uint32_t button;
-    int32_t x;
-    int32_t y;
-};
-
-struct GetSignatureMessage
-{
-    MessageType type = MessageType::CHECK_SIGNATURE;;
-    uintptr_t object;
-    uint32_t index;
-    bool method_name;
-    char signature[0x100];
-
-    int32_t result;
-};
-
-union Message
-{
-    Message() { };
-    MessageType type = MessageType::NONE;;
-    CallFunctionMessage call;
-    FunctionResultMessage result;
-    SendNotificationMessage notify;
-    RefineMessage refine;
-    UseItemMessage item;
-    KeyClickMessage key;
-    MouseClickMessage click;
-    GetSignatureMessage sig;
-};
-
 BotClient::BotClient() : m_browser_ipc(new SockIpc()) {}
 
+BotClient::~BotClient()
+{
+    Shutdown();
+}
+
+void BotClient::Shutdown()
+{
+    // runs during JVM shutdown: no new threads, no relaunch, nothing left behind
+    std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
+    m_want_browser = false;
+    kill_browser(false);
+}
+
 /**
- * Continuously reads from the browser process's log output pipe 
+ * Continuously reads from the browser process's log output pipe
  * and logs any lines that contain the "[browser]" tag.
  */
 static void browser_log_drain(int read_fd)
@@ -776,21 +794,21 @@ static void browser_log_drain(int read_fd)
         {
             const std::string_view line(partial.data() + scan_start, newline_pos - scan_start);
             if (line.find(browser_tag) != std::string_view::npos)
-                utils::log("{}\n", line);
+                utils::log("{}\n", std::string(line));
 
             scan_start = newline_pos + 1;
         }
 
         if (scan_start > 0)
             partial.erase(0, scan_start);
+
+        // guard against a producer that never writes newlines
+        if (partial.size() > 64 * 1024)
+            partial.clear();
     }
 
-    if (!partial.empty())
-    {
-        std::string_view tail(partial.data(), partial.size());
-        if (tail.find(browser_tag) != std::string_view::npos)
-            utils::log("{}\n", tail);
-    }
+    if (!partial.empty() && partial.find(browser_tag) != std::string::npos)
+        utils::log("{}\n", partial);
 
     close(read_fd);
 }
@@ -801,14 +819,6 @@ void BotClient::ToggleBrowserVisibility(bool visible)
         visible ? XMapWindow(display, browser) : XUnmapWindow(display, browser);
         return true;
     });
-}
-
-BotClient::~BotClient()
-{
-    if (Pid() > 0)
-    {
-        kill(Pid(), SIGKILL);
-    }
 }
 
 static std::string shell_escape(const std::string &value)
@@ -828,7 +838,7 @@ static std::string shell_escape(const std::string &value)
 static bool compute_sha256(const std::string &file_path, std::string &out_hash)
 {
     std::string command = "sha256sum " + shell_escape(file_path);
-    FILE *pipe = popen(command.c_str(), "r");
+    FILE *pipe = popen(command.c_str(), "re");
     if (!pipe)
         return false;
 
@@ -860,56 +870,85 @@ static bool compute_sha256(const std::string &file_path, std::string &out_hash)
     return true;
 }
 
+/**
+ * Validates the file hash; the result is cached by (device, inode, size, mtime) so
+ * relaunches after crashes don't re-hash the ~80MB AppImage every time.
+ */
 static bool validate_file_sha256(const std::string &file_path, const std::string &expected_hex)
 {
+    struct Cached
+    {
+        dev_t dev = 0;
+        ino_t ino = 0;
+        off_t size = -1;
+        struct timespec mtime {};
+        bool valid = false;
+    };
+    static Cached cached;
+
     if (expected_hex.empty())
         return false;
 
+    struct stat st {};
+    if (stat(file_path.c_str(), &st) != 0)
+        return false;
+
+    // cached either way: a bad file isn't re-hashed on every relaunch attempt (tick thread)
+    if (cached.size == st.st_size && cached.dev == st.st_dev && cached.ino == st.st_ino
+        && cached.mtime.tv_sec == st.st_mtim.tv_sec && cached.mtime.tv_nsec == st.st_mtim.tv_nsec)
+        return cached.valid;
+
     std::string actual_hash;
     if (!compute_sha256(file_path, actual_hash))
-        return false;
+        return false; // transient (e.g. popen failed), retry next time
 
     std::string normalized_expected = expected_hex;
     std::transform(normalized_expected.begin(), normalized_expected.end(), normalized_expected.begin(), [](unsigned char c) { return std::tolower(c); });
 
-    return actual_hash == normalized_expected;
+    cached = Cached { st.st_dev, st.st_ino, st.st_size, st.st_mtim, actual_hash == normalized_expected };
+    return cached.valid;
 }
 
-void sigchld_handler(int signal)
+/**
+ * AppImages (type 2 runtime) mount themselves with FUSE 2. Recent distributions
+ * (Ubuntu 22.04+, Mint 21+, Fedora, ...) don't ship libfuse.so.2 by default and
+ * containers usually have no /dev/fuse; in that case run in extract-and-run mode.
+ */
+static bool appimage_fuse_available()
 {
-    int status = 0;
-    waitpid(0, &status, WNOHANG);
+    if (access("/dev/fuse", R_OK | W_OK) != 0)
+        return false;
+
+    void *handle = dlopen("libfuse.so.2", RTLD_LAZY | RTLD_LOCAL);
+    if (!handle)
+        return false;
+    dlclose(handle);
+    return true;
 }
 
-
-void BotClient::Refresh()
+static std::string absolute_path(const char *path)
 {
-    utils::log("[Refresh] Triggering browser refresh\n");
-
-    if (!SendBrowserCommand("refresh"))
-    {
-        utils::log("[Refresh] refresh command failed, restarting browser\n");
-        if (Pid() > 0)
-            kill(Pid(), SIGKILL);
-        SetPid(-1);
-        m_browser_ipc.reset(new SockIpc());
-        LaunchBrowser();
-        reset();
-        return;
-    }
-
-    // if there's an existing flash process, kill it so we don't keep
-    // reusing the same PID after a refresh.
-    if (FlashPid() > 0)
-        kill(FlashPid(), SIGKILL);
-
-    reset();
+    char resolved[PATH_MAX];
+    if (realpath(path, resolved))
+        return resolved;
+    return path;
 }
 
 void BotClient::LaunchBrowser()
 {
-    const char *fpath = "lib/darkbot_browser_linux.AppImage";
+    std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
+
+    if (browser_alive())
+    {
+        utils::log("[LaunchBrowser] browser already running ({})\n", Pid());
+        return;
+    }
+
+    const char *fpath = BROWSER_PATH;
     static const std::string expected_sha256 = BROWSER_APPIMAGE_SHA256;
+
+    m_want_browser = true; // keep it running from now on (retried by IsValid on failures)
+    m_last_launch_ms = now_ms();
 
     /* ensure the browser binary exists and is executable before attempting to fork/exec */
     if (access(fpath, F_OK) != 0)
@@ -932,77 +971,147 @@ void BotClient::LaunchBrowser()
         }
     }
 
-    int log_pipe[2] = {-1, -1};
-    if (pipe(log_pipe) != 0)
-        utils::log("[LaunchBrowser] pipe() failed: {}\n", std::strerror(errno));
+    // Everything is prepared before fork(): the JVM is multi-threaded, so between fork and
+    // exec the child may only call async-signal-safe functions (no malloc, no locks).
+    std::string url = m_url;
+    std::string sid = m_sid;
 
-    int pid = fork();
+    while (!url.empty() && url.back() == '/')
+        url.pop_back();
+
+    if (sid.rfind("dosid=", 0) == 0)
+        sid.erase(0, 6);
+
+    static std::atomic<uint32_t> launch_counter { 0 };
+    m_browser_ipc_path = utils::format("/tmp/darkbot_ipc_{}_{}", getpid(), ++launch_counter);
+    unlink(m_browser_ipc_path.c_str());
+
+    std::vector<std::string> args {
+        fpath,
+        "--sid=" + sid,
+        "--url=" + url,
+        "--api-version=" + std::to_string(API_VERSION),
+        "--ipc-path=" + m_browser_ipc_path,
+        "--parent-pid=" + std::to_string(getpid()), // browser exits if the bot dies
+        "--launch",
+        "--no-sandbox", // required on distros restricting unprivileged user namespaces (Ubuntu 24.04+)
+        "--ozone-platform=x11",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+    };
+
+    std::vector<std::string> env;
+    // ld.so splits LD_PRELOAD on spaces and colons without any escaping: an install path
+    // like "/home/u/My Bots/..." would silently not load do_lib. The browser inherits our
+    // working directory, so the relative path works there.
+    std::string do_lib = absolute_path(DO_LIB_PATH);
+    if (do_lib.find_first_of(" :") != std::string::npos)
+        do_lib = DO_LIB_PATH;
+    std::string preload = "LD_PRELOAD=" + do_lib;
+    for (int i = 0; environ[i]; i++)
+    {
+        std::string_view entry(environ[i]);
+        if (entry.rfind("LD_PRELOAD=", 0) == 0)
+        {
+            // keep libraries the user preloads (e.g. gtk3-nocsd on Mint), ours goes first;
+            // sanitizer runtimes (debug builds of the bot) would break Electron
+            std::string_view libs = entry.substr(11);
+            while (!libs.empty())
+            {
+                size_t end = libs.find_first_of(" :");
+                std::string_view lib = libs.substr(0, end);
+                if (!lib.empty() && lib.find("libasan") == std::string_view::npos
+                    && lib.find("libtsan") == std::string_view::npos && lib.find("libubsan") == std::string_view::npos)
+                    preload.append(" ").append(lib);
+                if (end == std::string_view::npos)
+                    break;
+                libs.remove_prefix(end + 1);
+            }
+            continue;
+        }
+        if (entry.rfind("APPIMAGE_EXTRACT_AND_RUN=", 0) == 0)
+            continue;
+        env.emplace_back(entry);
+    }
+    env.push_back(preload);
+
+    m_launched_with_fuse = !m_force_extract_and_run && appimage_fuse_available();
+    if (!m_launched_with_fuse)
+    {
+        utils::log("[LaunchBrowser] FUSE 2 {}, using AppImage extract-and-run mode\n",
+                   m_force_extract_and_run ? "mount failed before" : "unavailable");
+        env.emplace_back("APPIMAGE_EXTRACT_AND_RUN=1");
+    }
+
+    std::vector<char *> argv, envp;
+    for (auto &a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    for (auto &e : env) envp.push_back(e.data());
+    envp.push_back(nullptr);
+
+    int log_pipe[2] = {-1, -1};
+    if (pipe2(log_pipe, O_CLOEXEC) != 0)
+    {
+        utils::log("[LaunchBrowser] pipe() failed: {}\n", std::strerror(errno));
+        log_pipe[0] = log_pipe[1] = -1;
+    }
+
+    int dev_null = open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+    struct rlimit rl {};
+    int max_fd = (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY)
+        ? static_cast<int>(std::min<rlim_t>(rl.rlim_cur, 65536)) : 4096;
+
+    sigset_t empty_mask;
+    sigemptyset(&empty_mask);
+
+    pid_t pid = fork();
 
     switch (pid)
     {
         case -1: // https://rachelbythebay.com/w/2014/08/19/fork/
         {
-            utils::log("Fork failed: {}\n", std::strerror(errno));
+            utils::log("[LaunchBrowser] fork failed: {}\n", std::strerror(errno));
             if (log_pipe[0] != -1) { close(log_pipe[0]); close(log_pipe[1]); }
             break;
         }
         case 0:
         {
+            // --- child: async-signal-safe calls only ---
+
+            // own session/process group: the whole browser tree can be killed at once even
+            // after the AppImage runtime died and its children got re-parented to init
+            setsid();
+
+            if (dev_null != -1)
+                dup2(dev_null, STDIN_FILENO);
+
             // redirect browser stdout/stderr into the pipe so the parent can log them
             if (log_pipe[1] != -1)
             {
                 dup2(log_pipe[1], STDOUT_FILENO);
                 dup2(log_pipe[1], STDERR_FILENO);
-                close(log_pipe[0]);
-                close(log_pipe[1]);
             }
 
-            std::vector<const char *> envp
+            // don't leak JVM file descriptors (sockets, jars, ...) into the browser
+            if (syscall(SYS_close_range, 3u, ~0u, 0u) != 0)
             {
-                "LD_PRELOAD=lib/libdo_lib.so",
-            };
-            for (int i = 0; environ[i]; i++)
-            {
-                envp.push_back(environ[i]);
-            }
-            envp.push_back(nullptr);
-
-            std::string url = m_url;
-            std::string sid = m_sid;
-
-            while (*(url.end()-1) == '/')
-            {
-                url.resize(url.size()-1);
+                for (int fd = 3; fd < max_fd; fd++)
+                    close(fd);
             }
 
-            if (sid.find("dosid=") == 0)
-            {
-                sid.replace(0, 6, "");
-            }
+            // the forking JVM thread may have signals blocked; exec keeps the mask
+            sigprocmask(SIG_SETMASK, &empty_mask, nullptr);
+            signal(SIGPIPE, SIG_DFL);
 
-            std::string arg_sid = std::string("--sid=") + sid;
-            std::string arg_url = std::string("--url=") + url;
-            std::string arg_api_version = std::string("--api-version=") + std::to_string(API_VERSION);
-
-            execle(
-                fpath,
-                fpath,
-                arg_sid.c_str(),
-                arg_url.c_str(),
-                arg_api_version.c_str(),
-                "--launch",
-                "--ozone-platform=x11",
-                "--disable-background-timer-throttling",
-                "--disable-renderer-backgrounding",
-                NULL,
-                envp.data());
-
-            break;
+            execve(fpath, argv.data(), envp.data());
+            _exit(127);
         }
         default:
         {
-            signal(SIGCHLD, sigchld_handler);
             SetPid(pid);
+            utils::log("[LaunchBrowser] browser started, pid {}\n", pid);
 
             // close write end in parent; read end passed to drain thread
             if (log_pipe[1] != -1) close(log_pipe[1]);
@@ -1014,6 +1123,119 @@ void BotClient::LaunchBrowser()
             break;
         }
     }
+
+    if (dev_null != -1)
+        close(dev_null);
+}
+
+/**
+ * Checks if our browser child is alive, reaping it if it exited (no global SIGCHLD
+ * handler: that would steal exit statuses of processes spawned by the JVM).
+ */
+bool BotClient::browser_alive()
+{
+    int pid = Pid();
+    if (pid <= 0)
+        return false;
+
+    int status = 0;
+    pid_t r = waitpid(pid, &status, WNOHANG);
+    if (r == 0)
+        return true;
+
+    if (r == pid)
+    {
+        // The AppImage runtime exits with 127 right away when it can't mount itself
+        // (libfuse2 present but fusermount unusable, containers, hardened systems):
+        // use extract-and-run from now on and relaunch without waiting for the backoff.
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 127 && m_launched_with_fuse
+            && now_ms() - m_last_launch_ms < 15'000 && !m_force_extract_and_run)
+        {
+            utils::log("[Browser] AppImage failed to mount with FUSE, switching to extract-and-run\n");
+            m_force_extract_and_run = true;
+            m_last_launch_ms = 0;
+        }
+
+        if (WIFEXITED(status))
+            utils::log("[Browser] process {} exited with code {}\n", pid, WEXITSTATUS(status));
+        else if (WIFSIGNALED(status))
+            utils::log("[Browser] process {} killed by signal {}\n", pid, WTERMSIG(status));
+
+        // Kill what's left of its process group right away (a pgid isn't reused while it
+        // has members) and forget the pid: once reaped it may be reused by another process.
+        kill(-pid, SIGKILL);
+        SetPid(-1);
+        m_browser_ipc->Close();
+        return false;
+    }
+
+    // ECHILD: not our child (shouldn't happen), fall back to a liveness probe
+    return ProcUtil::ProcessExists(pid);
+}
+
+void BotClient::kill_browser(bool reap_async)
+{
+    int pid = Pid();
+    if (pid > 0)
+    {
+        // Kill the whole tree: in extract-and-run mode the direct child is only the AppImage
+        // runtime, and orphaned flash processes would keep the game session alive.
+        auto descendants = ProcUtil::GetDescendants(pid);
+        kill(-pid, SIGKILL); // process group created by setsid() in LaunchBrowser
+        kill(pid, SIGKILL);
+        for (pid_t child : descendants)
+            kill(child, SIGKILL);
+
+        // reap without blocking the caller
+        if (reap_async)
+            std::thread([pid]() { waitpid(pid, nullptr, 0); }).detach();
+    }
+
+    SetPid(-1);
+    m_last_valid = false;
+    m_browser_ipc->Close();
+
+    if (!m_browser_ipc_path.empty())
+        unlink(m_browser_ipc_path.c_str());
+}
+
+void BotClient::restart_browser(const char *reason)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
+
+    utils::log("[Browser] restarting: {}\n", reason);
+    kill_browser();
+    reset();
+    window::reset_browser_window();
+    LaunchBrowser();
+}
+
+void BotClient::Refresh()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
+
+    utils::log("[Refresh] Triggering browser refresh\n");
+
+    const uint64_t launch_before = m_last_launch_ms;
+    if (!SendBrowserCommand("refresh"))
+    {
+        // SendBrowserCommand may already have relaunched a dead browser, or the browser is
+        // alive but still starting (socket/window not ready yet): don't kill it mid-startup,
+        // it's loading the game anyway
+        bool starting = browser_alive() && now_ms() - m_last_launch_ms < BROWSER_STARTUP_MS;
+        if (m_last_launch_ms == launch_before && !starting)
+            restart_browser("refresh command failed");
+        else
+            reset();
+        return;
+    }
+
+    // if there's an existing flash process, kill it so we don't keep
+    // reusing the same PID after a refresh.
+    if (FlashPid() > 0)
+        kill(FlashPid(), SIGKILL);
+
+    reset();
 }
 
 // helper used within SendBrowserCommand; returns true when the IPC
@@ -1023,34 +1245,25 @@ bool BotClient::ensure_browser_ipc_connected()
     if (m_browser_ipc->Connected())
         return true;
 
-    if (Pid() < 0)
+    if (Pid() <= 0 || m_browser_ipc_path.empty())
         return false;
 
-    std::string ipc_path = utils::format("/tmp/darkbot_ipc_{}", Pid());
-    if (!m_browser_ipc->Connect(ipc_path))
+    if (!m_browser_ipc->Connect(m_browser_ipc_path))
     {
-        utils::log("[SendBrowserCommand] Failed to connect to browser {}\n", Pid());
+        static RateLimit log_limit(10'000);
+        if (log_limit.Allow())
+            utils::log("[SendBrowserCommand] Failed to connect to browser {} ({})\n", Pid(), m_browser_ipc_path);
         return false;
     }
     return true;
 }
 
 /**
- * Builds a JSON string for the given command and parameters, including a timestamp for uniqueness.
+ * Builds a single-line JSON string for the given command and parameters.
  */
-static std::string build_browser_command_json(const std::string &cmd, std::initializer_list<JsonParam> params)
+static std::string build_browser_command_json(uint32_t id, const std::string &cmd, std::initializer_list<JsonParam> params)
 {
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
-    char ts_buf[32];
-    auto [ts_ptr, ts_ec] = std::to_chars(ts_buf, ts_buf + sizeof(ts_buf), ms);
-    if (ts_ec != std::errc())
-    {
-        ts_ptr = ts_buf;
-    }
-
-    size_t reserve_size = cmd.size() + static_cast<size_t>(ts_ptr - ts_buf) + 16;
+    size_t reserve_size = cmd.size() + 32;
     for (const JsonParam &param : params)
     {
         reserve_size += 4 + std::strlen(param.key) + param.value.size();
@@ -1058,10 +1271,11 @@ static std::string build_browser_command_json(const std::string &cmd, std::initi
 
     std::string json;
     json.reserve(reserve_size);
-    json.append("{\"cmd\":\"");
+    json.append("{\"id\":");
+    json.append(std::to_string(id));
+    json.append(",\"cmd\":\"");
     json.append(cmd);
-    json.append("\",\"ts\":");
-    json.append(ts_buf, static_cast<size_t>(ts_ptr - ts_buf));
+    json.push_back('"');
 
     for (const JsonParam &param : params)
     {
@@ -1076,16 +1290,17 @@ static std::string build_browser_command_json(const std::string &cmd, std::initi
 }
 
 /**
- * Sends a command to the browser process via IPC, with retries and acknowledgment handling.
+ * Sends a command to the browser process via IPC and waits for its acknowledgment.
  * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
+ * Values must already be valid JSON (numbers or escaped strings).
  */
 bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params)
 {
-    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
+    std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
+
+    if (!browser_alive())
     {
-        utils::log("[SendBrowserCommand] Browser process not found, restarting it\n");
-        LaunchBrowser();
-        reset();
+        maybe_relaunch_browser();
         return false;
     }
 
@@ -1094,75 +1309,95 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
         return false;
     }
 
-    std::string json = build_browser_command_json(cmd, params);
-    std::string expected_ack;
-    expected_ack.reserve(json.size() + 3);
-    expected_ack.append(json);
-    expected_ack.append("|ok"); // the JS side appends "|ok" to acknowledge receipt and processing
-    int maxAttempts = 3;
-    std::chrono::milliseconds timeout = std::chrono::milliseconds(500);
+    const uint32_t id = ++m_browser_cmd_id;
+    const std::string json = build_browser_command_json(id, cmd, params);
+    const std::string id_prefix = std::to_string(id) + "|";
 
-    for (int attempt = 1; attempt <= maxAttempts; ++attempt)
+    // Only resend when the write itself failed (the browser never saw the command);
+    // resending after a missing ack could duplicate key presses.
+    bool sent = false;
+    for (int attempt = 0; attempt < 2 && !sent; ++attempt)
     {
-        if (!m_browser_ipc->Send(json.c_str()))
-        {
-            utils::log("[SendBrowserCommand] send failed on attempt {}\n", attempt);
-            // try reconnect
-            m_browser_ipc.reset(new SockIpc());
-            if (!ensure_browser_ipc_connected())
-            {
-                utils::log("[SendBrowserCommand] reconnect attempt failed\n");
-                return false;
-            }
-            continue; // retry send
-        }
-
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-        while (std::chrono::steady_clock::now() < deadline)
-        {
-            std::string reply;
-            if (m_browser_ipc->Recv(reply))
-            {
-                if (reply.find(expected_ack) != std::string::npos)
-                {
-                    return true; // success
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-
-        utils::log("[SendBrowserCommand] no ack for '{}' retrying ({}/{})\n", json.c_str(), attempt, maxAttempts);
+        sent = m_browser_ipc->Send(json, BROWSER_SEND_TIMEOUT_MS);
+        if (!sent && !ensure_browser_ipc_connected())
+            break;
     }
 
-    utils::log("[SendBrowserCommand] failed to get ack for '{}'\n", json.c_str());
+    if (!sent)
+    {
+        utils::log("[SendBrowserCommand] send failed for '{}'\n", cmd);
+        return false;
+    }
+
+    // replies are "<id>|ok" / "<id>|err"; skip stale replies of earlier timed-out commands
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(BROWSER_ACK_TIMEOUT_MS);
+    std::string line;
+    while (true)
+    {
+        auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0 || !m_browser_ipc->RecvLine(line, static_cast<int>(left)))
+            break;
+
+        if (line.rfind(id_prefix, 0) == 0)
+        {
+            if (line.compare(id_prefix.size(), std::string::npos, "ok") == 0)
+                return true;
+
+            utils::log("[SendBrowserCommand] browser rejected '{}': {}\n", cmd, line);
+            return false;
+        }
+    }
+
+    utils::log("[SendBrowserCommand] no ack for '{}'\n", json);
     return false;
 }
 
 bool BotClient::find_flash_process()
 {
-    // require all substrings when scanning /proc.
-    auto procs = ProcUtil::FindProcsByName({"darkbot_browser", "no-sandbox", "ppapi"});
+    // Also called from memory search / flash calls on the bot's tick thread: don't wait
+    // behind another thread that's busy with the browser (restart, command ack).
+    std::unique_lock<std::recursive_mutex> lock(m_browser_mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return false;
+
+    if (FlashPid() > 0)
+        return true;
+
+    int browser = Pid();
+    if (browser <= 0)
+        return false;
+
+    uint64_t now = now_ms();
+    if (now - m_last_flash_scan_ms < FLASH_SCAN_INTERVAL_MS)
+        return false;
+    m_last_flash_scan_ms = now;
 
     int best_pid = -1;
     uint64_t best_memory = 0;
 
-    for (int proc_pid : procs)
+    for (pid_t proc_pid : ProcUtil::GetDescendants(browser))
     {
-        if (ProcUtil::IsChildOf(proc_pid, Pid()) && ProcUtil::GetPages(proc_pid, "libpepflashplayer").size() > 0)
+        // the pepper plugin process runs with --type=ppapi (the broker also matches,
+        // but it doesn't map the flash library or is much smaller)
+        if (ProcUtil::GetCmdline(proc_pid).find("--type=ppapi") == std::string::npos)
+            continue;
+
+        if (!ProcUtil::HasMapping(proc_pid, "libpepflashplayer"))
+            continue;
+
+        // Search for the flash process with the most memory usage,
+        // since the browser can spawn multiple and we want to target the main one
+        uint64_t memory = ProcUtil::GetMemoryUsage(proc_pid);
+        if (memory >= best_memory)
         {
-            // Search for the flash process with the most memory usage,
-            // since the browser can spawn multiple and we want to target the main one
-            uint64_t memory = ProcUtil::GetMemoryUsage(proc_pid);
-            if (memory >= best_memory)
-            {
-                best_memory = memory;
-                best_pid = proc_pid;
-            }
+            best_memory = memory;
+            best_pid = proc_pid;
         }
     }
 
     if (best_pid > 0)
     {
+        utils::log("[Flash] found flash process {}\n", best_pid);
         SetFlashPid(best_pid);
         return true;
     }
@@ -1172,29 +1407,49 @@ bool BotClient::find_flash_process()
 
 void BotClient::reset()
 {
-    // Reset
-    if (m_shared_mem_flash) shmdt(m_shared_mem_flash);
-    if (m_flash_sem >= 0) semctl(m_flash_sem, 0, IPC_RMID, 1);
-
-
-    m_shared_mem_flash = nullptr;
+    m_last_valid = false;
+    // the old flash process is gone (or being killed): drop its shared memory segment
+    m_flash_ipc.Reset(FlashPid(), true);
     SetFlashPid(-1);
-    m_flash_sem = -1;
-    m_flash_shmid = -1;
+    m_last_flash_scan_ms = 0;
 }
 
-// Not a great name since it has side-effects like refreshgin or restarting the browser
+/**
+ * Relaunches the browser if it should be running but isn't (crashed, or a previous launch
+ * failed), rate limited so a browser that can't start doesn't respawn in a tight loop.
+ * Returns true if a launch was attempted.
+ */
+bool BotClient::maybe_relaunch_browser()
+{
+    if (!m_want_browser || now_ms() - m_last_launch_ms < RELAUNCH_BACKOFF_MS)
+        return false;
+    restart_browser("browser process not running");
+    return true;
+}
+
+// Not a great name since it has side-effects like refreshing or restarting the browser
 bool BotClient::IsValid()
 {
-    if (Pid() > 0 && !ProcUtil::ProcessExists(Pid()))
+    // Called every tick by the bot's main loop: if another thread is busy with the browser
+    // (e.g. waiting for a command ack), answer with the last result instead of blocking.
+    std::unique_lock<std::recursive_mutex> lock(m_browser_mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return m_last_valid;
+
+    m_last_valid = check_valid();
+    return m_last_valid;
+}
+
+bool BotClient::check_valid()
+{
+
+    if (!browser_alive())
     {
-        utils::log("[IsValid] Browser process not found, restarting it\n");
-        LaunchBrowser();
-        reset();
+        maybe_relaunch_browser();
         return false;
     }
 
-    if (FlashPid() == -1)
+    if (FlashPid() <= 0)
     {
         return find_flash_process();
     }
@@ -1205,168 +1460,98 @@ bool BotClient::IsValid()
         Refresh();
         return false;
     }
-    return true;
+
+    // The game thread ticks do_lib's timer hook; if it stops for a long time the game is
+    // frozen (or lost its hooks) and every direct call would fail. Reporting it as invalid
+    // makes the bot run its normal stuck-recovery (refresh).
+    return !m_flash_ipc.IsFrozen(FlashPid(), FLASH_FROZEN_MS);
 }
 
 /**
- * Sends a command message to the flash process via shared memory and semaphores, and optionally waits for a response.
+ * Sends a command message to the flash process through shared memory (see tools/flash_ipc.h)
+ * and optionally copies back the response.
  */
-bool BotClient::SendFlashCommand(Message *message, Message *response)
+bool BotClient::SendFlashCommand(const Message &message, Message *response)
 {
-    if (!IsValid())
+    if (FlashPid() <= 0 && !find_flash_process())
     {
         return false;
     }
 
-    if ((m_flash_shmid = shmget(FlashPid(), MEM_SIZE, IPC_CREAT | 0666)) < 0)
-    {
-        utils::log("[SendFlashCommand] Failed to get shared memory\n");
-        return false;
-    }
-
-    if (!m_shared_mem_flash || m_shared_mem_flash == (void *)-1)
-    {
-        if ((m_shared_mem_flash = reinterpret_cast<Message *>(shmat(m_flash_shmid, NULL, 0))) == (void *)-1)
-        {
-            utils::log("[SendFlashCommand] Failed to attach shared memory to our process\n");
-            return false;
-        }
-    }
-
-    if (m_flash_sem < 0)
-    {
-        if ((m_flash_sem = semget(FlashPid(), 2, IPC_CREAT | 0600)) < 0)
-        {
-            SetFlashPid(-1);
-            utils::log("[SendFlashCommand] Failed to create semaphore\n");
-            return false;
-        }
-    }
-
-
-    *m_shared_mem_flash = *message;
-
-    static timespec timeout { .tv_sec = 1, .tv_nsec = 0 };
-    sembuf sop[2] { { 0, -1, 0 }, { 1, 0, 0 } };
-
-    bool success = true;
-
-    // Notify
-    if (semtimedop(m_flash_sem, &sop[0], 1, &timeout) == -1)
-    {
-        if (errno == EAGAIN)
-        {
-            utils::log("[SendFlashCommand] Failed to send command to flash, notify timeout\n");
-        }
-        else
-        {
-            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
-        }
-        success = false;
-    }
-
-    // Wait
-    if (success && semtimedop(m_flash_sem, &sop[1], 1, &timeout) == -1)
-    {
-        if (errno == EAGAIN)
-        {
-            utils::log("[SendFlashCommand] Failed to send command to flash, wait timeout\n");
-        }
-        else
-        {
-            utils::log("[SendFlashCommand] semop failed: {}\n", std::strerror(errno));
-        }
-        success = false;
-    }
-
-    if (response && success)
-    {
-        memcpy(response, m_shared_mem_flash, sizeof(Message));
-    }
-
-    return success;
+    return m_flash_ipc.Send(FlashPid(), message, response);
 }
 
 bool BotClient::SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args)
 {
     Message message;
-    message.type = MessageType::SEND_NOTIFICATION;
-    size_t cap = sizeof(message.notify.argv) / sizeof(message.notify.argv[0]);
+    message.notify = {};
+    size_t cap = std::size(message.notify.argv);
     size_t to_copy = std::min(args.size(), cap);
-    message.notify.argc = to_copy;
+    message.notify.argc = static_cast<uint32_t>(to_copy);
     if (to_copy)
         std::memcpy(message.notify.argv, args.data(), to_copy * sizeof(message.notify.argv[0]));
-    std::strncpy(message.notify.name, name.c_str(), sizeof(message.notify.name));
-    message.notify.name[sizeof(message.notify.name) - 1] = '\0';
-    SendFlashCommand(&message);
-    return true;
+    std::strncpy(message.notify.name, name.c_str(), sizeof(message.notify.name) - 1);
+    return SendFlashCommand(message);
 }
 
 bool BotClient::RefineOre(uintptr_t refine_util, uint32_t ore, uint32_t amount)
 {
     Message message;
-    message.type = MessageType::REFINE;
+    message.refine = {};
     message.refine.refine_util = refine_util;
-    message.refine.ore = ore;
-    message.refine.amount = amount;
+    message.refine.ore = static_cast<int>(ore);
+    message.refine.amount = static_cast<int>(amount);
 
-    SendFlashCommand(&message);
-    return true;
+    return SendFlashCommand(message);
 }
 
 bool BotClient::UseItem(const std::string &name, uint8_t type, uint8_t bar)
 {
     Message message;
-    message.type = MessageType::USE_ITEM;
+    message.item = {};
     message.item.action_type = type;
     message.item.action_bar = bar;
-    std::strncpy(message.item.name, name.c_str(), sizeof(message.item.name));
-    message.item.name[sizeof(message.item.name) - 1] = '\0';
-    SendFlashCommand(&message);
-    return true;
+    std::strncpy(message.item.name, name.c_str(), sizeof(message.item.name) - 1);
+    return SendFlashCommand(message);
 }
 
 uintptr_t BotClient::CallMethod(uintptr_t obj, uint32_t index, const std::vector<uintptr_t> &args)
 {
     Message message;
-    message.type = MessageType::CALL;
-
+    message.call = {};
     message.call.object = obj;
     message.call.index = index;
-    size_t cap = sizeof(message.call.argv) / sizeof(message.call.argv[0]);
-    size_t to_copy = std::min(args.size(), cap);
-    message.call.argc = to_copy;
+    size_t to_copy = std::min(args.size(), std::size(message.call.argv));
+    message.call.argc = static_cast<int>(to_copy);
     if (to_copy)
-        memcpy(message.call.argv, args.data(), to_copy * sizeof(uintptr_t));
+        std::memcpy(message.call.argv, args.data(), to_copy * sizeof(uintptr_t));
 
     Message response;
-
-    SendFlashCommand(&message, &response);
+    if (!SendFlashCommand(message, &response) || response.result.error)
+        return 0;
 
     return response.result.value;
 }
 
 /**
- * Sends a key click event to the flash process via shared memory and semaphores.
+ * Sends a key click event to the flash process via shared memory.
  *
  * Note: may not work properly for some game actions.
  */
 bool BotClient::KeyClickLegacy(uint32_t key)
 {
     Message message;
-    message.type = MessageType::KEY_CLICK;
+    message.key = {};
     message.key.key = key;
-    return SendFlashCommand(&message);
+    return SendFlashCommand(message);
 }
 
 void BotClient::KeyClick(uint32_t key)
 {
     // First try sending key click via browser command
-    bool success = SendBrowserCommand("keyClick", {{"key", std::to_string(key)}});
-
     // If failed, then send via legacy flash IPC method
-    if (!success)
-        success = KeyClickLegacy(key);
+    if (!SendBrowserCommand("keyClick", {{"key", std::to_string(key)}}))
+        KeyClickLegacy(key);
 }
 
 void BotClient::KeyDown(uint32_t key)
@@ -1385,19 +1570,19 @@ void BotClient::SendText(const std::string &text)
 }
 
 /**
- * Sends a mouse click event to the flash process via shared memory and semaphores,
- * using the legacy method when X11 control is unavailable.
- * 
+ * Sends a mouse click event to the flash process via shared memory,
+ * used when X11 control is unavailable.
+ *
  * Note: may not work properly for some game actions.
  */
 bool BotClient::MouseClickLegacy(int32_t x, int32_t y)
 {
     Message message;
-    message.type = MessageType::MOUSE_CLICK;
+    message.click = {};
     message.click.x = x;
     message.click.y = y;
     message.click.button = 1;
-    return SendFlashCommand(&message);
+    return SendFlashCommand(message);
 }
 
 void BotClient::MouseClick(int32_t x, int32_t y)
@@ -1476,7 +1661,7 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
 
         int32_t x = static_cast<int32_t>(lparam_low);
         int32_t y = static_cast<int32_t>(lparam_high);
-        uint32_t key = static_cast<uint32_t>(wparam);
+        uint32_t key = static_cast<uint16_t>(wparam);
 
         // Handle native mouse and keyboard events based on the message type.
         // https://github.com/darkbot-reloaded/DarkBot/blob/master/src/main/java/eu/darkbot/api/utils/NativeAction.java
@@ -1518,7 +1703,7 @@ void BotClient::PostActions(const std::vector<uint64_t> &actions)
                 break;
         }
         // small delay between actions
-        if (i < actions.size() - 1)
+        if (i + 1 < actions.size())
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
@@ -1539,7 +1724,7 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
 
     {
         std::lock_guard<std::mutex> lock(m_paste_mutex);
-        m_paste_queue.push({before, text, after});
+        m_paste_queue.push({std::move(before), text, std::move(after)});
     }
 
     // start worker thread once
@@ -1550,8 +1735,13 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
                 {
                     std::lock_guard<std::mutex> lock(m_paste_mutex);
                     if (m_paste_queue.empty())
+                    {
+                        // cleared under the lock so a concurrent PasteText either sees
+                        // the worker running (and its item gets picked up) or starts a new one
+                        m_paste_worker_running = false;
                         break;
-                    item = m_paste_queue.front();
+                    }
+                    item = std::move(m_paste_queue.front());
                     m_paste_queue.pop();
                 }
 
@@ -1564,7 +1754,9 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
                 }
 
                 SendText(str);
-                std::this_thread::sleep_for(std::chrono::milliseconds(750));
+                // the browser types one character every 10 ms (key_handler.js handleText);
+                // wait until it's done so e.g. an Enter "after" action doesn't cut the text
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::max<size_t>(750, 250 + str.size() * 12)));
 
                 if (!after_actions.empty())
                 {
@@ -1572,7 +1764,6 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
             }
-            m_paste_worker_running = false;
         }).detach();
     }
 }
@@ -1580,26 +1771,28 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
 int BotClient::CheckMethodSignature(uintptr_t object, uint32_t index, bool check_name, const std::string &sig)
 {
     Message message;
-    message.type = MessageType::CHECK_SIGNATURE;
+    message.sig = {};
     message.sig.object = object;
     message.sig.index = index;
     message.sig.method_name = check_name;
+    message.sig.result = -1;
 
-    strncpy(message.sig.signature, sig.c_str(), sizeof(message.sig.signature));
-    message.sig.signature[sizeof(message.sig.signature) - 1] = '\0';
+    std::strncpy(message.sig.signature, sig.c_str(), sizeof(message.sig.signature) - 1);
 
     Message response;
-    SendFlashCommand(&message, &response);
+    // -1 on any transport failure: the Java side treats only 0 as "invalid signature"
+    // (which stops the bot), so it must never see garbage here
+    if (!SendFlashCommand(message, &response))
+        return -1;
 
     return response.sig.result;
 }
 
 void BotClient::EnableCursorMarker(bool enable)
 {
-    if (enable == cursor_marker::state.enabled)
+    if (cursor_marker::state.enabled.exchange(enable) == enable)
         return;
 
-    cursor_marker::state.enabled = enable;
     if (!enable)
     {
         std::lock_guard<std::mutex> lock(cursor_marker::state.mutex);

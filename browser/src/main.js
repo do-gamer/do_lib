@@ -1,6 +1,6 @@
 const {app, BrowserWindow} = require('electron')
 const path = require('path')
-const net = require('net')
+const fs = require('fs')
 const {initSplashScreen} = require("@trodi/electron-splashscreen")
 
 let mainWindow;
@@ -9,62 +9,68 @@ function log(...args) { console.log('[browser]', ...args); }
 
 app.commandLine.appendSwitch('ppapi-flash-path', getFlashPath())
 
+// Keep the game running at full speed while the window is hidden, unmapped or covered;
+// otherwise Chromium throttles timers/rendering and the bot tick increases.
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
 const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
+const { createCommandServer } = require('./command_server');
 
-var server = net.createServer(function (sock) {
-    sock.setEncoding('utf8');
+/**
+ * Executes one command, returns true on success.
+ */
+function handleCommand(obj) {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+        log("Received command but mainWindow is not initialized, ignoring");
+        return false;
+    }
 
-    sock.on('data', (data) => {
-        if (!mainWindow) {
-            log("Received command but mainWindow is not initialized, ignoring");
-            return;
-        }
+    switch (obj.cmd) {
+        case "refresh":
+            log("Received refresh command, reloading...");
+            mainWindow.reload();
+            return true;
+        case "setSize":
+            // resize the browser window to the given width and height
+            mainWindow.setSize(obj.w, obj.h);
+            return true;
+        case "keyClick":
+            handleKeyClick(mainWindow.webContents, obj.key);
+            return true;
+        case "keyDown":
+            handleKeyDown(mainWindow.webContents, obj.key);
+            return true;
+        case "keyUp":
+            handleKeyUp(mainWindow.webContents, obj.key);
+            return true;
+        case "text":
+            handleText(mainWindow.webContents, obj.text);
+            return true;
+        default:
+            log("Unknown command:", obj.cmd);
+            return false;
+    }
+}
 
+createCommandServer(parseArgv().ipcPath || ("/tmp/darkbot_ipc_" + process.pid), handleCommand, log);
+
+// Close together with the bot, also when it's killed or crashes (otherwise the browser
+// keeps running in the background with a live game session).
+const parentPid = parseInt(parseArgv().parentPid || '0', 10);
+if (parentPid > 0) {
+    setInterval(() => {
         try {
-            const obj = JSON.parse(data);
-            switch (obj.cmd) {
-                case "refresh":
-                    log("Received refresh command, reloading...");
-                    mainWindow.reload();
-                    break;
-                case "setSize":
-                    // resize the browser window to the given width and height
-                    mainWindow.setSize(obj.w, obj.h);
-                    break;
-                case "keyClick":
-                    handleKeyClick(mainWindow.webContents, obj.key);
-                    break;
-                case "keyDown":
-                    handleKeyDown(mainWindow.webContents, obj.key);
-                    break;
-                case "keyUp":
-                    handleKeyUp(mainWindow.webContents, obj.key);
-                    break;
-                case "text":
-                    handleText(mainWindow.webContents, obj.text);
-                    break;
-            }
+            process.kill(parentPid, 0);
         } catch (e) {
-            log("Failed to parse command:", data, e);
-            return;
+            if (e.code === 'ESRCH') {
+                log("Bot process", parentPid, "is gone, exiting");
+                app.exit(0);
+            }
         }
-
-        // Send acknowledgment back to the sender.
-        sock.write(data + "|ok");
-    });
-
-    sock.on('error', (err) => {
-        log("Socket error", err);
-    });
-
-    sock.on('close', (hadError) => {
-        log("Socket closed" + (hadError ? " (error)" : ""));
-        // client may reconnect later; the server stays listening and will emit
-        // a new connection event when that happens.  nothing to do here other
-        // than logging/debugging.
-    });
-});
-server.listen("/tmp/darkbot_ipc_" + process.pid);
+    }, 2000).unref();
+}
 
 function createWindow(url, sid, apiVersion, launchGame = false) {
     let icon = path.join(process.resourcesPath, "res", "icon.png")
@@ -84,6 +90,9 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
                 contextIsolation: true,
                 nodeIntegration: false,
                 enableRemoteModule: false,
+                // don't throttle timers/animations when the window is hidden or in background
+                backgroundThrottling: false,
+                spellcheck: false,
                 preload: path.join(__dirname, 'preload.js')
             }
         },
@@ -122,18 +131,26 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
         event.preventDefault();
     });
 
-    window.webContents.on('before-input-event', (event, input) => {
-        let focus = () => BrowserWindow.getFocusedWindow();
-
-        if (!focus() || input.type != "keyUp") {
-            return;
+    // Recovery: a crashed renderer shows a dead page forever, reload it. Flash plugin
+    // crashes are detected and handled by the native client (it refreshes).
+    window.webContents.on('render-process-gone', (event, details) => {
+        log("Renderer process gone:", details.reason, "exit code", details.exitCode);
+        if (details.reason !== 'clean-exit' && !window.isDestroyed()) {
+            setTimeout(() => { if (!window.isDestroyed()) window.reload(); }, 1000);
         }
     });
 
-    log(url, sid, launchGame);
+    window.webContents.on('plugin-crashed', (event, name, version) => {
+        log("Plugin crashed:", name, version);
+    });
+
+    window.on('unresponsive', () => log("Window unresponsive"));
+    window.on('responsive', () => log("Window responsive again"));
+
+    log(url, launchGame); // sid is a session credential, keep it out of the logs
     if (url && sid) {
         window.webContents.session.cookies.set({url: url, name: 'dosid', value: sid})
-            .then(() => window.loadURL(url + '/indexInternal.es?action=' + ((launchGame) ? 'internalMapRevolution ': 'internalStart')))
+            .then(() => window.loadURL(url + '/indexInternal.es?action=' + ((launchGame) ? 'internalMapRevolution' : 'internalStart')))
     } else {
         window.loadURL('https://darkorbit.com')
         //window.loadFile(path.join(__dirname, 'index.html'))
@@ -161,7 +178,7 @@ app.on('window-all-closed', function () {
 })
 
 function parseArgv() {
-    let url, sid, apiVersion, launchGame = false
+    let url, sid, apiVersion, ipcPath, parentPid, launchGame = false
 
     for (let i = 1; i < process.argv.length; i++) {
         const arg = process.argv[i]
@@ -182,13 +199,24 @@ function parseArgv() {
             case '--api-version':
                 apiVersion = value
                 break
+            case '--ipc-path':
+                ipcPath = value
+                break
+            case '--parent-pid':
+                parentPid = value
+                break
         }
     }
 
-    return {url, sid, apiVersion, launchGame};
+    return {url, sid, apiVersion, ipcPath, parentPid, launchGame};
 }
 
 function getFlashPath() {
-    app.commandLine.appendSwitch("--no-sandbox")
-    return path.join(process.resourcesPath.split("/")[1] === "tmp" ? process.resourcesPath : app.getAppPath(), './res/linux/libpepflashplayer.so');
+    app.commandLine.appendSwitch("no-sandbox")
+
+    // Packaged (AppImage, mounted or extracted anywhere, whatever TMPDIR is): extraResources
+    // live next to app.asar. Development (npm start): relative to the app directory.
+    const packaged = path.join(process.resourcesPath, 'res', 'linux', 'libpepflashplayer.so');
+    if (fs.existsSync(packaged)) return packaged;
+    return path.join(app.getAppPath(), 'res', 'linux', 'libpepflashplayer.so');
 }

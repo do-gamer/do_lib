@@ -1,5 +1,6 @@
 #include "darkorbit.h"
 #include <string>
+#include <thread>
 #include <iostream>
 #include <sstream>
 
@@ -14,7 +15,22 @@
 // Proxy flash calls to our handlers
 uintptr_t hook_proxy(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
 {
-    auto &hook = Darkorbit::get().get_hooks()[env->method_info->id];
+    auto &darkorbit = Darkorbit::get();
+    auto &hooks = darkorbit.get_hooks();
+    const uint32_t id = env->method_info->id;
+
+    auto it = hooks.find(id);
+    if (it == hooks.end())
+    {
+        // Not ours anymore (restored by uninstall), just forward to the original
+        return (!(argv[0] & 7)) ? env->method_info->method_proc(env, argc, argv)
+                                : env->method_info->invoker(env, argc, argv);
+    }
+
+    // unordered_map references stay valid across inserts; erasing is deferred while
+    // any proxy is on the stack (see uninstall), so this reference can't dangle.
+    Darkorbit::FlashHook &hook = it->second;
+    darkorbit.enter_proxy();
 
     hook.method = env;
 
@@ -35,28 +51,31 @@ uintptr_t hook_proxy(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
         r = env->method_info->invoker(env, argc, argv);
     }
 
-    // Save potentially new invokers
-    if (env->method_proc != hook.envproc)
+    if (!hook.removed)
     {
+        // Save potentially new invokers
         hook.envproc = env->method_proc;
-    }
-
-    if (hook.infoproc != env->method_info->method_proc)
-    {
         hook.infoproc = env->method_info->method_proc;
-    }
-
-    if (hook.invoker != env->method_info->invoker)
-    {
         hook.invoker = env->method_info->invoker;
+
+        // Reinstall hook
+        env->method_proc = hook_proxy;
+        env->method_info->method_proc = hook_proxy;
+        env->method_info->invoker = hook_proxy;
     }
 
-    // Reinstall hook
-    env->method_proc = hook_proxy;
-    env->method_info->method_proc = hook_proxy;
-    env->method_info->invoker = hook_proxy;
-
+    darkorbit.leave_proxy();
     return r;
+}
+
+void Darkorbit::leave_proxy()
+{
+    if (--m_proxy_depth == 0 && m_clear_hooks_pending)
+    {
+        m_clear_hooks_pending = false;
+        for (auto it = m_hooks.begin(); it != m_hooks.end();)
+            it = it->second.removed ? m_hooks.erase(it) : std::next(it);
+    }
 }
 
 void Darkorbit::hook_flash_function(avm::MethodEnv *method, MyInvoke_t handler)
@@ -64,7 +83,7 @@ void Darkorbit::hook_flash_function(avm::MethodEnv *method, MyInvoke_t handler)
     FlashHook hook;
 
     auto mit = m_hooks.find(method->method_info->id);
-    if (mit != m_hooks.end())
+    if (mit != m_hooks.end() && !mit->second.removed)
     {
         mit->second.restore();
     }
@@ -72,10 +91,10 @@ void Darkorbit::hook_flash_function(avm::MethodEnv *method, MyInvoke_t handler)
     hook.envproc = method->method_proc;
     hook.infoproc = method->method_info->method_proc;
     hook.invoker = method->method_info->invoker;
-    hook.handler = handler;
+    hook.handler = std::move(handler);
     hook.method = method;
 
-    m_hooks[method->method_info->id] = hook;
+    m_hooks[method->method_info->id] = std::move(hook);
 
     method->method_proc = hook_proxy;
     method->method_info->method_proc = hook_proxy;
@@ -87,7 +106,7 @@ void Darkorbit::hook_flash_function(avm::MethodInfo *method, MyInvoke_t handler)
     FlashHook hook;
 
     auto mit = m_hooks.find(method->id);
-    if (mit != m_hooks.end())
+    if (mit != m_hooks.end() && !mit->second.removed)
     {
         mit->second.restore();
     }
@@ -95,19 +114,43 @@ void Darkorbit::hook_flash_function(avm::MethodInfo *method, MyInvoke_t handler)
     hook.envproc = method->method_proc;
     hook.infoproc = method->method_proc;
     hook.invoker = method->invoker;
-    hook.handler = handler;
+    hook.handler = std::move(handler);
     hook.method_info = method;
 
-    m_hooks[method->id] = hook;
+    m_hooks[method->id] = std::move(hook);
 
     method->method_proc = hook_proxy;
     method->invoker = hook_proxy;
 
 }
 
+// Set TANOS_DEBUG=1 to log hook activity (diagnostics, off by default)
+static const bool g_debug = getenv("TANOS_DEBUG") != nullptr;
+
+// The main isolate's thread is the first to JIT anything. Flash Workers run their own VM (and
+// GC) on other threads; their JIT/free events never concern our hooks and m_hooks isn't
+// thread-safe, so only the game thread may touch it.
+static bool is_game_thread()
+{
+    static const std::thread::id game_thread = std::this_thread::get_id();
+    return std::this_thread::get_id() == game_thread;
+}
+
 // maybe use a global callback thingy to dispatch jit stuff
 void Darkorbit::notify_jit(avm::MethodInfo *method)
 {
+    if (!is_game_thread())
+        return;
+
+    if (g_debug)
+    {
+        static std::atomic<uint32_t> count { 0 };
+        uint32_t n = ++count;
+        std::string name = method->name();
+        if (n <= 20 || n % 1000 == 0 || name.find("autoStartEnabled") != std::string::npos)
+            utils::log("[debug] jit #{}: {}\n", n, name);
+    }
+
     if (!m_installed && method->name().find("autoStartEnabled") != std::string::npos)
     {
         hook_flash_function(method, [this] (avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
@@ -120,15 +163,44 @@ void Darkorbit::notify_jit(avm::MethodInfo *method)
 
 void Darkorbit::notify_freechunk(uintptr_t chunk)
 {
-    // Clear parsed-traits cache because VM memory regions may be freed/recycled
+    if (g_debug)
+    {
+        static std::atomic<uint32_t> count { 0 };
+        uint32_t n = ++count;
+        if (n == 1 || n % 10000 == 0)
+            utils::log("[debug] free_chunk #{}\n", n);
+    }
+
+    // Invalidate VM-pointer keyed caches (O(1), this runs inside the GC free path)
     avm::clear_traits_cache();
+
+    if (!is_game_thread())
+        return;
 
     for (auto &[id, hook] : m_hooks)
     {
-        if ((reinterpret_cast<uintptr_t>(hook.method) & ~0xfff) == chunk)
+        if (!hook.removed && hook.method && (reinterpret_cast<uintptr_t>(hook.method) & ~0xfff) == chunk)
         {
-            uninstall();
+            if (m_installed)
+            {
+                // uninstall() modifies m_hooks, never keep iterating after it
+                uninstall();
+                return;
+            }
+
+            // Not installed (e.g. the autoStartEnabled hook of a failed install): restore it
+            // while the memory is still valid and forget it, so nothing writes to it later.
+            hook.restore();
+            hook.removed = true;
+            m_clear_hooks_pending = true;
         }
+    }
+
+    if (m_clear_hooks_pending && m_proxy_depth == 0)
+    {
+        m_clear_hooks_pending = false;
+        for (auto it = m_hooks.begin(); it != m_hooks.end();)
+            it = it->second.removed ? m_hooks.erase(it) : std::next(it);
     }
 }
 
@@ -151,24 +223,55 @@ std::unordered_map<uint32_t, game::Ship *> Darkorbit::get_ships()
     return r;
 }
 
-std::future<uintptr_t> Darkorbit::call_sync(const std::function<uintptr_t()> &f)
+std::future<uintptr_t> Darkorbit::call_sync(std::function<uintptr_t()> f, std::shared_ptr<std::atomic<bool>> cancelled)
 {
-    std::scoped_lock lk { m_call_mut };
-    // push the task into the vector, then return its future in a portable way
-    m_async_calls.emplace_back(std::packaged_task<uintptr_t()>(f));
-    auto &task = m_async_calls.back();
+    std::packaged_task<uintptr_t()> task([f = std::move(f), cancelled = std::move(cancelled)] () -> uintptr_t
+    {
+        if (cancelled && cancelled->load())
+            return 0;
+        return f();
+    });
     std::future<uintptr_t> fut = task.get_future();
+
+    std::scoped_lock lk { m_call_mut };
+    if (!m_installed || m_async_calls.size() >= MAX_PENDING_CALLS)
+        return {};
+
+    m_async_calls.emplace_back(std::move(task));
     return fut;
+}
+
+bool Darkorbit::post_async(std::function<uintptr_t()> f)
+{
+    const uint64_t queued = flash_ipc::now_ms();
+    return call_sync([f = std::move(f), queued]() -> uintptr_t
+    {
+        if (flash_ipc::now_ms() - queued > flash_ipc::ASYNC_MAX_DELAY_MS)
+            return 0; // stale input, dropping is safer than acting on an old game state
+        return f();
+    }).valid();
 }
 
 void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
 {
-    std::scoped_lock lk { m_call_mut };
-    for (auto &task : m_async_calls)
+    m_ipc.Heartbeat();
+
+    // Run the tasks outside the lock: they call into the VM, which may re-enter us
+    // (GC -> free_chunk -> uninstall) and the ipc thread must be able to queue meanwhile.
+    std::vector<std::packaged_task<uintptr_t()>> tasks;
     {
+        std::scoped_lock lk { m_call_mut };
+        if (m_async_calls.empty())
+            return;
+        tasks.swap(m_async_calls);
+    }
+
+    for (auto &task : tasks)
+    {
+        if (!m_installed)
+            break; // remaining tasks are dropped, their futures report broken_promise
         task();
     }
-    m_async_calls.clear();
 }
 
 bool Darkorbit::mouse_click(int x, int y, int button)
@@ -180,7 +283,9 @@ bool Darkorbit::mouse_click(int x, int y, int button)
 
 bool Darkorbit::key_click(uint32_t key)
 {
-    auto *kbmapper = m_event_manager->get_at<avm::ScriptObject *>(0x68);
+    auto *kbmapper = m_event_manager ? m_event_manager->get_at<avm::ScriptObject *>(0x68) : nullptr;
+    if (!kbmapper)
+        return false;
     kbmapper->call(3, static_cast<Atom>(key));
     return true;
 }
@@ -188,7 +293,9 @@ bool Darkorbit::key_click(uint32_t key)
 bool Darkorbit::lock_entity(uint32_t id)
 {
     utils::log("[*] Trying to lock entity {}\n", id);
-    auto facade = m_screen_manager->get_at<avm::ScriptObject *>(0x100, 0x78, 0x28);
+    auto facade = m_screen_manager ? m_screen_manager->get_at<avm::ScriptObject *>(0x100, 0x78, 0x28) : nullptr;
+    if (!facade)
+        return false;
 
     game::Ship *player = reinterpret_cast<game::Ship *>(avm::remove_kind(m_event_manager->call(7)));
     game::Ship *target_ship = get_ships()[id];
@@ -220,7 +327,7 @@ bool Darkorbit::lock_entity(uint32_t id)
 
 bool Darkorbit::refine_ore(uint32_t ore, uint32_t amount)
 {
-    auto *refinement = m_gui_manager->get_at<avm::ScriptObject *>(0x78);
+    auto *refinement = m_gui_manager ? m_gui_manager->get_at<avm::ScriptObject *>(0x78) : nullptr;
 
     if (refinement)
     {
@@ -242,21 +349,19 @@ bool Darkorbit::refine_ore(uint32_t ore, uint32_t amount)
         if (m_refine_multiname)
         {
             auto *obj = flash_stuff::finddef(m_main->vtable->einit, m_const_pool->get_multiname(m_refine_multiname));
+            auto *closure = obj ? obj->get_at<avm::ClassClosure *>(0x20) : nullptr;
+            auto *instance = closure ? reinterpret_cast<avm::ScriptObject *>(closure->call(5)) : nullptr;
+            auto *ore_info = instance ? instance->get_at<avm::ScriptObject *>(0x20) : nullptr;
+            auto *ore_type = ore_info ? ore_info->get_at<avm::ScriptObject *>(0x20) : nullptr;
+            auto *net = m_main->get_at<avm::ScriptObject *>(0x230);
 
-            if (auto *closure = obj->get_at<avm::ClassClosure *>(0x20))
-            {
-                auto *instance = reinterpret_cast<avm::ScriptObject *>(closure->call(5));
+            if (!ore_type || !net)
+                return false;
 
-                auto *ore_info = instance->get_at<avm::ScriptObject *>(0x20);
-                auto *ore_type = ore_info->get_at<avm::ScriptObject *>(0x20);
+            ore_info->write_at<double>(0x28, amount);
+            ore_type->write_at<int>(0x20, ore);
 
-                ore_info->write_at<double>(0x28, amount);
-                ore_type->write_at<int>(0x20, ore);
-
-                auto *net = m_main->get_at<avm::ScriptObject *>(0x230);
-
-                net->call(19, instance);
-            }
+            net->call(19, instance);
         }
     }
 
@@ -265,11 +370,14 @@ bool Darkorbit::refine_ore(uint32_t ore, uint32_t amount)
 
 bool Darkorbit::use_item(const std::string &name, uint8_t type, uint8_t bar)
 {
+    auto *net = m_main ? m_main->get_at<avm::ScriptObject *>(0x230) : nullptr;
+    if (!m_action_closure || !net)
+        return false;
+
     avm::String *name_str = create_string(name);
-
     avm::ScriptObject *instance = m_action_closure->construct();
-
-    auto *net = m_main->get_at<avm::ScriptObject *>(0x230);
+    if (!name_str || !instance)
+        return false;
 
 
     if (!m_item_prop_mn)
@@ -306,14 +414,16 @@ bool Darkorbit::use_item(const std::string &name, uint8_t type, uint8_t bar)
 
 bool Darkorbit::send_notification(const std::string &name, const std::vector<Atom> &args)
 {
-    utils::log("[*] Send notification {}\n", name);
-
-    auto facade = m_screen_manager->get_at<avm::ScriptObject *>(0x100, 0x78, 0x28);
+    auto facade = m_screen_manager ? m_screen_manager->get_at<avm::ScriptObject *>(0x100, 0x78, 0x28) : nullptr;
+    if (!facade)
+        return false;
 
     // no need to cache these, ref count is not increased
     auto *arg_array = reinterpret_cast<avm::Array *>(
         flash_stuff::newarray(facade->vtable->methods[0], static_cast<uint32_t>(args.size()), const_cast<Atom *>(args.data())));
     avm::String *notification = create_string("MapAssetNotificationTRY_TO_SELECT_MAPASSET");
+    if (!arg_array || !notification)
+        return false;
 
     facade->call(8, notification, (uintptr_t)arg_array | 1);
 
@@ -429,33 +539,50 @@ bool Darkorbit::install(uintptr_t main_app_address)
         return false;
     }
 
-    if (!m_ipc.Running() && m_ipc.Init())
+    if (!m_ipc.Running())
     {
-        m_ipc.Run();
-    }
-    else
-    {
-        // ....
+        if (m_ipc.Init())
+            m_ipc.Run([this](flash_ipc::Message &msg) { return handle_ipc_message(msg); });
+        else
+            utils::log("[!] Failed to init ipc\n");
     }
 
-    return (m_installed = true);
+    m_installed = true;
+    m_ipc.Heartbeat();
+    m_ipc.SetInstalled(true);
+    utils::log("[+] Installed\n");
+    return true;
 }
 
 bool Darkorbit::uninstall()
 {
     utils::log("[-] Uninstalling...\n");
 
+    m_installed = false;
+    m_ipc.SetInstalled(false);
+
     for (auto &[id, hook] : m_hooks)
     {
-        hook.restore();
+        if (!hook.removed)
+            hook.restore();
+        hook.removed = true;
     }
-    m_hooks.clear();
+
+    // A hook_proxy may be on the stack (uninstall triggered from inside a hooked call),
+    // erase the entries once it has returned.
+    if (m_proxy_depth > 0)
+        m_clear_hooks_pending = true;
+    else
+        m_hooks.clear();
 
     m_refine_multiname = 0;
     m_item_prop_mn = 0;
 
-
-    m_ipc.Remove();
-    m_installed = false;
+    // Drop queued tasks: waiting ipc requests are released immediately (broken_promise).
+    // The ipc thread itself keeps running and answers NOT_READY until the next install.
+    {
+        std::scoped_lock lk { m_call_mut };
+        m_async_calls.clear();
+    }
     return true;
 }

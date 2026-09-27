@@ -8,10 +8,13 @@
 #include <queue>
 #include <tuple>
 #include <atomic>
+#include <cstdint>
+#include <vector>
 #include "proc_util.h"
+#include "flash_ipc.h"
+#include "flash_ipc_client.h"
 
 class SockIpc;
-union Message;
 
 struct JsonParam
 {
@@ -27,12 +30,15 @@ public:
 
     void SetCredentials(const std::string &sid, const std::string &url)
     {
+        std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
         m_sid = sid;
         m_url = url;
     }
 
     void Refresh();
     void LaunchBrowser();
+    // stops the browser for good (JVM shutdown)
+    void Shutdown();
 
     void SetPid(int pid) { m_browser_pid = pid; }
     void SetFlashPid(int pid) { m_flash_pid = pid; }
@@ -45,7 +51,7 @@ public:
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash
-    bool SendFlashCommand(Message *message, Message *response = nullptr);
+    bool SendFlashCommand(const flash_ipc::Message &message, flash_ipc::Message *response = nullptr);
 
     bool RefineOre(uintptr_t refine_util, uint32_t ore, uint32_t amount);
     bool SendNotification(uintptr_t screen_manager, const std::string &name, const std::vector<uintptr_t> &args);
@@ -79,68 +85,59 @@ public:
     T Read(uintptr_t address, int *result = nullptr)
     {
         T r;
-        int ok = ProcUtil::ReadMemoryBytes(m_flash_pid, address, &r, sizeof(T));
+        ssize_t n = ProcUtil::ReadMemoryBytes(m_flash_pid, address, &r, sizeof(T));
         if (result)
         {
-            *result = ok;
+            *result = static_cast<int>(n);
         }
-        if (ok < 0)
+        if (n != static_cast<ssize_t>(sizeof(T)))
         {
-            return 0;
+            return T{};
         }
         return r;
     }
 
     template <typename T>
-    void Write(uintptr_t address, T value, int *result = nullptr)
+    bool Write(uintptr_t address, T value, int *result = nullptr)
     {
-        T r;
-        int ok = ProcUtil::WriteMemoryBytes(m_flash_pid, address, &value, sizeof(T));
+        ssize_t n = ProcUtil::WriteMemoryBytes(m_flash_pid, address, &value, sizeof(T));
         if (result)
         {
-            *result = ok;
+            *result = static_cast<int>(n);
         }
+        return n == static_cast<ssize_t>(sizeof(T));
     }
 
-    std::vector<uintptr_t> QueryMemory(uint8_t *query, size_t size, size_t amount)
+    std::vector<uintptr_t> QueryMemory(const uint8_t *query, size_t size, size_t amount)
     {
         if (m_flash_pid < 0 && !find_flash_process())
         {
             return { };
         }
-        std::vector<uintptr_t> result (amount);
-        std::string mask(size, 'x');
-        size_t f = ProcUtil::QueryMemory(m_flash_pid, query, mask.c_str(), &result[0], result.size());
-        result.resize(f);
-        return result;
+        return ProcUtil::QueryMemory(m_flash_pid, query, size, amount);
     }
-
-    std::vector<uintptr_t> QueryMemory(std::vector<uint8_t> &query, size_t amount)
-    {
-        if (m_flash_pid < 0 && !find_flash_process())
-        {
-            return { };
-        }
-        std::vector<uintptr_t> result(amount);
-        std::string mask(query.size(), 'x');
-        size_t f = ProcUtil::QueryMemory(m_flash_pid, &query[0], mask.c_str(), &result[0], result.size());
-        result.resize(f);
-        return result;
-    }
-
 
 private:
     std::unique_ptr<SockIpc> m_browser_ipc;
-    char *m_shared_mem = nullptr;
-    Message *m_shared_mem_flash = nullptr;
+    uint32_t m_browser_cmd_id = 0;
 
     std::string m_sid;
     std::string m_url;
+    std::string m_browser_ipc_path;
 
-    int m_flash_sem = -1;
-    int m_flash_shmid = -1;
+    // flash ipc (shared memory created by do_lib inside the flash process)
+    FlashIpcClient m_flash_ipc;
 
-    int m_browser_pid = -1, m_flash_pid = -1;
+    std::atomic<int> m_browser_pid { -1 }, m_flash_pid { -1 };
+
+    uint64_t m_last_launch_ms = 0;
+    bool m_launched_with_fuse = false;
+    bool m_want_browser = false; // createWindow was called: keep the browser running
+    bool m_force_extract_and_run = false;
+    uint64_t m_last_flash_scan_ms = 0;
+
+    // browser lifecycle + browser socket (recursive: restart paths call each other)
+    std::recursive_mutex m_browser_mutex;
 
     // protects PostActions from concurrent invocation
     std::mutex m_post_actions_mutex;
@@ -150,8 +147,16 @@ private:
     std::queue<std::tuple<std::vector<uint64_t>, std::string, std::vector<uint64_t>>> m_paste_queue;
     std::atomic<bool> m_paste_worker_running{false};
 
+    std::atomic<bool> m_last_valid { false };
+    bool check_valid();
+
     bool find_flash_process();
     void reset();
+
+    bool browser_alive();
+    void kill_browser(bool reap_async = true);
+    void restart_browser(const char *reason);
+    bool maybe_relaunch_browser();
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();

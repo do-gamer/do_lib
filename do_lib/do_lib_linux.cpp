@@ -1,18 +1,20 @@
 #include <dlfcn.h>
+#include <cstring>
 
 #include "utils.h"
 #include "flash_stuff.h"
 #include "darkorbit.h"
 
 
-void *dlopen(const char *filename, int flags)
+// Interposes libc's dlopen via LD_PRELOAD; must stay exported with -fvisibility=hidden.
+extern "C" __attribute__((visibility("default"))) void *dlopen(const char *filename, int flags)
 {
-    auto *original = reinterpret_cast<decltype(dlopen) *>(dlsym(RTLD_NEXT, "dlopen"));
+    static auto *original = reinterpret_cast<void *(*)(const char *, int)>(dlsym(RTLD_NEXT, "dlopen"));
 
-    auto *r = (*original)(filename, flags);
+    auto *r = original(filename, flags);
 
     // Install flash hooks
-    if (filename && std::string(filename).find("libpepflashplayer.so") != std::string::npos)
+    if (r && filename && strstr(filename, "libpepflashplayer.so"))
     {
         if (!flash_stuff::install())
         {

@@ -42,18 +42,36 @@ subhook::Hook *verify_jit_hook = nullptr;
 
 
 
+// Call the original through subhook's trampoline when it could be built (hook stays
+// installed, no code patching per call, safe if another thread enters meanwhile).
+// Otherwise fall back to temporarily removing the hook.
 void verify_jit(uintptr_t _this, avm::MethodInfo *method, uintptr_t ms, uintptr_t toplevel, avm::AbcEnv *abc_env, uintptr_t osr)
 {
-    subhook::ScopedHookRemove hk(verify_jit_hook);
-    reinterpret_cast<decltype(verify_jit) *>(verify_jit_hook->GetSrc())(_this, method, ms, toplevel, abc_env, osr);
+    if (auto *trampoline = reinterpret_cast<decltype(verify_jit) *>(verify_jit_hook->GetTrampoline()))
+    {
+        trampoline(_this, method, ms, toplevel, abc_env, osr);
+    }
+    else
+    {
+        subhook::ScopedHookRemove hk(verify_jit_hook);
+        reinterpret_cast<decltype(verify_jit) *>(verify_jit_hook->GetSrc())(_this, method, ms, toplevel, abc_env, osr);
+    }
     Darkorbit::get().notify_jit(method);
 }
 
 void free_chunk(uintptr_t _this, uintptr_t chunk)
 {
-    subhook::ScopedHookRemove hk(free_chunk_hook);
     Darkorbit::get().notify_freechunk(chunk);
-    reinterpret_cast<decltype(free_chunk) *>(free_chunk_hook->GetSrc())(_this, chunk);
+
+    if (auto *trampoline = reinterpret_cast<decltype(free_chunk) *>(free_chunk_hook->GetTrampoline()))
+    {
+        trampoline(_this, chunk);
+    }
+    else
+    {
+        subhook::ScopedHookRemove hk(free_chunk_hook);
+        reinterpret_cast<decltype(free_chunk) *>(free_chunk_hook->GetSrc())(_this, chunk);
+    }
 }
 
 uintptr_t get_input_param()
@@ -134,6 +152,12 @@ avm::MethodSignature *flash_stuff::get_method_signature(avm::MethodInfo *mi)
 
 bool flash_stuff::install()
 {
+    // dlopen may be called several times for the same library; hooking twice would make
+    // the trampoline jump into our own hook forever
+    static bool installed = false;
+    if (installed)
+        return true;
+
     uintptr_t base = 0;
     try
     {
@@ -141,24 +165,11 @@ bool flash_stuff::install()
     }
     catch (...)
     {
-        utils::log("[!] Failed to find flash lib");
+        utils::log("[!] Failed to find flash lib\n");
         return false;
     }
 
-    verify_jit_hook = new subhook::Hook(
-                reinterpret_cast<void *>(base + offsets::verifyjit),
-                reinterpret_cast<void *>(verify_jit),
-                subhook::HookFlags::HookFlag64BitOffset);
-
-    verify_jit_hook->Install();
-
-    free_chunk_hook = new subhook::Hook(
-                reinterpret_cast<void *>(base + offsets::free_chunk),
-                reinterpret_cast<void *>(free_chunk),
-                subhook::HookFlags::HookFlag64BitOffset);
-
-    free_chunk_hook->Install();
-
+    // function pointers first: the hooks can trigger Darkorbit::install(), which uses them
     getproperty_f           = reinterpret_cast<getproperty_t>(base + offsets::getproperty);
     setproperty_f           = reinterpret_cast<setproperty_t>(base + offsets::setproperty);
     get_traits_binding_f    = reinterpret_cast<get_traits_binding_t>(base + offsets::get_traits_binding);
@@ -169,6 +180,33 @@ bool flash_stuff::install()
     mouse_press_f           = reinterpret_cast<mouse_press_t>(base + offsets::mouse_press);
     get_method_signature_f  = reinterpret_cast<get_method_signature_t>(base + offsets::get_method_sig);
 
+    // free_chunk first: verify_jit may lead to install() and hooks that rely on it
+    free_chunk_hook = new subhook::Hook(
+                reinterpret_cast<void *>(base + offsets::free_chunk),
+                reinterpret_cast<void *>(free_chunk),
+                subhook::HookFlags::HookFlag64BitOffset);
+
+    if (!free_chunk_hook->Install())
+    {
+        utils::log("[!] Failed to install free_chunk hook\n");
+        return false;
+    }
+
+    verify_jit_hook = new subhook::Hook(
+                reinterpret_cast<void *>(base + offsets::verifyjit),
+                reinterpret_cast<void *>(verify_jit),
+                subhook::HookFlags::HookFlag64BitOffset);
+
+    if (!verify_jit_hook->Install())
+    {
+        utils::log("[!] Failed to install verify_jit hook\n");
+        free_chunk_hook->Remove(); // all or nothing
+        return false;
+    }
+
+    installed = true;
+    utils::log("[+] Flash hooks installed (trampolines: {}, {})\n",
+               verify_jit_hook->GetTrampoline() != nullptr, free_chunk_hook->GetTrampoline() != nullptr);
     return true;
 }
 

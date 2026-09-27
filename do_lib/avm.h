@@ -24,11 +24,7 @@ namespace avm
 
     typedef ScriptObject* (*CreateInstanceProc)(ClassClosure *cls);
 
-#ifdef WIN32
-    typedef uintptr_t (__fastcall *MethodInvoke_t)(MethodEnv *, uint32_t, uintptr_t *);
-#else
     typedef uintptr_t (*MethodInvoke_t)(MethodEnv *, uint32_t, uintptr_t*);
-#endif
 
     const Atom TRUE = (1 << 3 | 5);
     const Atom FALSE = 5;
@@ -56,10 +52,10 @@ namespace avm
     public:
         MyTrait() { }
 
-        avm::TraitKind kind;
+        avm::TraitKind kind = avm::TRAIT_Slot;
         int type_id = 0;
         int id = 0;
-        int temp;
+        int temp = 0;
 
         int name_index = 0;
 
@@ -701,7 +697,7 @@ namespace avm
         template<typename ... Ts>
         uintptr_t call(uint32_t index, Ts... args)
         {
-            auto size = sizeof...(Ts);
+            constexpr auto size = sizeof...(Ts);
             uintptr_t arg_buf[size] = { reinterpret_cast<uintptr_t>(args)...};
             return call_method(index, size, arg_buf);
         }
@@ -729,7 +725,11 @@ namespace avm
         template <typename T, typename ... Ts>
         T get_at(uintptr_t offset, Ts ... offsets) const
         {
-            return reinterpret_cast<ScriptObject **>((uintptr_t)this + offset)[0]->get_at<T>(offsets...);
+            // null intermediate objects (e.g. while a map loads) end the chain instead of crashing the game
+            auto *next = reinterpret_cast<ScriptObject *const *>((uintptr_t)this + offset)[0];
+            if (!next)
+                return T{};
+            return next->get_at<T>(offsets...);
         }
     };
 
