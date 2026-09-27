@@ -34,5 +34,5 @@ docker run --rm --shm-size=1g "${EXTRA[@]}" \
     -v "$ROOT:$ROOT:ro" -v "$LIBDIR:$LIBDIR:ro" -w "$ROOT" \
     darktanos-it:ubuntu22.04 bash -c "
         useradd -m -u $(id -u) tester 2>/dev/null || true
-        su tester -c 'TEST_SWF=\"${TEST_SWF:-}\" SOAK_SECONDS=\"${SOAK_SECONDS:-}\" STRESS_SECONDS=\"${STRESS_SECONDS:-}\" TEST_TIMEOUT=\"${TEST_TIMEOUT:-}\" JAVA_PRELOAD=\"${JAVA_PRELOAD:-}\" ASAN_OPTIONS=\"${ASAN_OPTIONS:-}\" UBSAN_OPTIONS=\"${UBSAN_OPTIONS:-}\" JAVA_OPTS=\"${JAVA_OPTS:-}\" tests/integration/run_in_container.sh \"$LIBDIR\" \"$LIBDIR/darkbot_browser_linux.AppImage\" \"$MODE\"'
+        su tester -c 'TEST_SWF=\"${TEST_SWF:-}\" SOAK_SECONDS=\"${SOAK_SECONDS:-}\" STRESS_SECONDS=\"${STRESS_SECONDS:-}\" CLICK_TEST=\"${CLICK_TEST:-}\" TEST_TIMEOUT=\"${TEST_TIMEOUT:-}\" JAVA_PRELOAD=\"${JAVA_PRELOAD:-}\" ASAN_OPTIONS=\"${ASAN_OPTIONS:-}\" UBSAN_OPTIONS=\"${UBSAN_OPTIONS:-}\" JAVA_OPTS=\"${JAVA_OPTS:-}\" tests/integration/run_in_container.sh \"$LIBDIR\" \"$LIBDIR/darkbot_browser_linux.AppImage\" \"$MODE\"'
     "

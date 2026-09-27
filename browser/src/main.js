@@ -49,9 +49,11 @@ function handleCommand(obj) {
         case "keyUp":
             handleKeyUp(mainWindow.webContents, obj.key);
             return true;
-        case "text":
-            handleText(mainWindow.webContents, obj.text);
-            return true;
+        case "text": {
+            // with "wait" the answer comes after the last character was typed (text paste)
+            const typing = handleText(mainWindow.webContents, obj.text);
+            return obj.wait ? typing.then(() => true) : true;
+        }
         default:
             log("Unknown command:", obj.cmd);
             return false;

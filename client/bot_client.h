@@ -47,7 +47,7 @@ public:
 
     bool IsValid();
 
-    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {});
+    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {}, int ack_timeout_ms = 0);
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash

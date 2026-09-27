@@ -18,6 +18,7 @@ public class TanosIT {
 
     static final DarkTanos tanos = new DarkTanos();
     static final List<String> failures = new ArrayList<>();
+    static volatile java.awt.Window focusWindow; // DarkBot GUI stand-in (tanos.awt)
 
     static void result(String name, Object value) {
         System.out.println("RESULT " + name + " " + value);
@@ -79,6 +80,47 @@ public class TanosIT {
             });
         } catch (Exception ignored) { }
         return kinds.toString();
+    }
+
+    // NativeAction encoding (eu.darkbot.api.utils.NativeAction)
+    static long action(int message, int x, int y, boolean after) {
+        long v = (x & 0xffffL) | ((long) (y & 0xffff) << 16) | ((long) (message & 0xffff) << 48);
+        return after ? v | (1L << 63) : v;
+    }
+
+    /**
+     * GroupManager.sendInvite: focus the field (2 clicks), paste the name, click the button.
+     * Repeated with a different name each time; with -Dtanos.awt=true a Swing window has the
+     * keyboard focus first (like DarkBot's GUI), so the browser has to take it for typing.
+     */
+    static void pasteTest(String url, Path events) throws Exception {
+        tanos.setData(url, "dosid=integrationtest", "", "");
+        new Thread(tanos::createWindow).start();
+        result("launch_to_valid_ms", waitValid(90_000));
+        Thread.sleep(3000); // page loaded
+
+        int runs = Integer.getInteger("tanos.pasteRuns", 5), ok = 0, focusOk = 0;
+        for (int i = 0; i < runs; i++) {
+            if (focusWindow != null) javax.swing.SwingUtilities.invokeAndWait(() -> { focusWindow.toFront(); focusWindow.requestFocus(); });
+            Thread.sleep(500);
+            Files.deleteIfExists(events);
+
+            String name = "player" + (char) ('a' + i) + i + "x";
+            tanos.pasteText(name,
+                    action(0x1FF, 150, 115, false),
+                    action(0x1FF, 150, 115, false),
+                    action(0x1FF, 450, 115, true));
+            Thread.sleep(4000);
+
+            List<String> lines = Files.exists(events) ? Files.readAllLines(events) : new ArrayList<>();
+            String invite = lines.stream().filter(l -> l.startsWith("invite value=")).findFirst().orElse("(no invite click)");
+            System.out.println("PASTE " + name + " -> " + invite);
+            if (lines.stream().filter(l -> l.startsWith("mousedown name")).count() >= 2) focusOk++;
+            if (invite.equals("invite value=" + name)) ok++;
+        }
+        result("paste_runs_ok", ok + "/" + runs);
+        check(focusOk == runs, "before-clicks reached the text field in every run");
+        check(ok == runs, "full name typed and invite clicked in every run");
     }
 
     static long selfStat(String what) {
@@ -201,11 +243,17 @@ public class TanosIT {
                 javax.swing.JFrame frame = new javax.swing.JFrame("DarkBot GUI stand-in");
                 frame.setSize(300, 200);
                 frame.setVisible(true);
+                focusWindow = frame;
             });
             result("awt", "loaded");
         }
 
         result("api_version", tanos.getVersion());
+
+        if (args.length > 3 && args[2].equals("--paste-test")) {
+            pasteTest(url, Paths.get(args[3]));
+            finish();
+        }
 
         if (args.length > 3 && args[2].equals("--stress")) {
             stress(url, Long.parseLong(args[3]));

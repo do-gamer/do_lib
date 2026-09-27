@@ -16,6 +16,11 @@ createCommandServer(ipcPath, (obj) => {
             while (Date.now() < until) { }
             return true
         }
+        case 'async':
+            // like "text" with wait: answered once the work is done
+            return new Promise((resolve) => setTimeout(() => resolve(true), obj.ms))
+        case 'asyncfail':
+            return Promise.reject(new Error('failed'))
         case 'count':
             process.stdout.write('executed=' + executed + '\n')
             return true

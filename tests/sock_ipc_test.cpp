@@ -125,6 +125,17 @@ int main()
         CHECK_EQ(acks, 50);
     });
 
+    suite.run("async command is answered when its work completes", [&]
+    {
+        auto t0 = steady_clock::now();
+        CHECK(command(sock, "async", ",\"ms\":300") == "ok");
+        double ms = duration<double, std::milli>(steady_clock::now() - t0).count();
+        test::info("async ack after %.0f ms (work takes 300 ms)", ms);
+        CHECK(ms >= 290 && ms < 1000);
+        CHECK(command(sock, "asyncfail") == "err");
+        CHECK(command(sock, "keyClick", ",\"key\":72") == "ok");
+    });
+
     suite.run("text with quotes, backslashes and unicode survives", [&]
     {
         CHECK(command(sock, "text", ",\"text\":\"a \\\"quoted\\\" \\\\ path \\u00e9\"") == "ok");

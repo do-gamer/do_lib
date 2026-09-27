@@ -37,7 +37,7 @@ echo "### $LABEL"
 cd "$WORK"
 shm_before=$(ipcs -m | grep -c '^0x')
 sem_before=$(ipcs -s | grep -c '^0x')
-TANOS_DEBUG=1 timeout ${TEST_TIMEOUT:-900} ${JAVA_PRELOAD:+env LD_PRELOAD=$JAVA_PRELOAD} java ${JAVA_OPTS:-} -Dtanos.lib="$LIBDIR/DarkTanos.so" -cp "$WORK/classes" TanosIT http://127.0.0.1:8000/ "$WORK/test.swf" ${SOAK_SECONDS:+--soak $SOAK_SECONDS}${STRESS_SECONDS:+--stress $STRESS_SECONDS}
+TANOS_DEBUG=1 timeout ${TEST_TIMEOUT:-900} ${JAVA_PRELOAD:+env LD_PRELOAD=$JAVA_PRELOAD} java ${JAVA_OPTS:-} -Dtanos.lib="$LIBDIR/DarkTanos.so" -cp "$WORK/classes" TanosIT http://127.0.0.1:8000/ "$WORK/test.swf" ${SOAK_SECONDS:+--soak $SOAK_SECONDS}${STRESS_SECONDS:+--stress $STRESS_SECONDS}${CLICK_TEST:+--paste-test "$WORK/events.log"}
 status=$?
 sleep 2
 

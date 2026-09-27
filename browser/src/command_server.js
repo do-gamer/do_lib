@@ -1,6 +1,7 @@
 // Command server for the native client (DarkTanos.so).
 // Messages are newline delimited JSON ({"id":N,"cmd":...}); every message is answered
-// with "N|ok" or "N|err" so the client never waits for a timeout on failures.
+// with "N|ok" or "N|err" so the client never waits for a timeout on failures. A handler may
+// return a Promise; the answer is then sent once it settles.
 // Kept free of Electron APIs so it can be tested with plain Node.
 const net = require('net')
 const fs = require('fs')
@@ -19,17 +20,22 @@ function createCommandServer(ipcPath, handleCommand, log) {
                 buffer = buffer.slice(newline + 1);
                 if (!line) continue;
 
-                let id = 0, ok = false;
+                let id = 0, result = false;
                 try {
                     const obj = JSON.parse(line);
                     id = obj.id || 0;
-                    ok = handleCommand(obj) === true;
+                    result = handleCommand(obj);
                 } catch (e) {
                     log("Failed to handle command:", line, e);
                 }
 
-                // Send acknowledgment back to the sender.
-                if (!sock.destroyed) sock.write(id + (ok ? "|ok\n" : "|err\n"));
+                // Send acknowledgment back to the sender (after completion for async commands).
+                const ack = (ok) => { if (!sock.destroyed) sock.write(id + (ok === true ? "|ok\n" : "|err\n")); };
+                if (result instanceof Promise) {
+                    result.then(ack, (e) => { log("Command failed:", line, e); ack(false); });
+                } else {
+                    ack(result);
+                }
             }
 
             // protect against a peer that never sends newlines

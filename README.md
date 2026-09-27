@@ -44,7 +44,8 @@ What this does:
 5. Reports the minimum glibc version the libraries need
 6. Runs `./copy.sh` automatically if that file exists and is executable
 
-Flags: `-c` clean build, `-b` build the browser, `-d` portable build in Docker.
+Flags: `-c` clean build, `-b` build the browser, `-d` portable build in Docker,
+`--no-copy` skip `copy.sh` (e.g. test builds).
 
 ## Set executable permission for AppImage
 

@@ -62,6 +62,12 @@ namespace
     constexpr int BROWSER_SEND_TIMEOUT_MS = 250;
     constexpr int BROWSER_ACK_TIMEOUT_MS = 1500;
 
+    // Text paste (group invite, chat): let the game focus the input field after the "before"
+    // clicks, and let the typed text settle before the "after" actions (e.g. the Invite button).
+    constexpr int PASTE_FOCUS_SETTLE_MS = 700;
+    constexpr int PASTE_TEXT_SETTLE_MS = 400;
+    constexpr int PASTE_AFTER_SETTLE_MS = 500;
+
     inline uint64_t now_ms() { return flash_ipc::now_ms(); }
 
     // Logs at most once per |interval_ms| for a given call site.
@@ -1294,7 +1300,7 @@ static std::string build_browser_command_json(uint32_t id, const std::string &cm
  * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
  * Values must already be valid JSON (numbers or escaped strings).
  */
-bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params)
+bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params, int ack_timeout_ms)
 {
     std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
 
@@ -1330,7 +1336,8 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
     }
 
     // replies are "<id>|ok" / "<id>|err"; skip stale replies of earlier timed-out commands
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(BROWSER_ACK_TIMEOUT_MS);
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(ack_timeout_ms > 0 ? ack_timeout_ms : BROWSER_ACK_TIMEOUT_MS);
     std::string line;
     while (true)
     {
@@ -1750,18 +1757,20 @@ void BotClient::PasteText(const std::string &text, const std::vector<uint64_t> &
                 if (!before_actions.empty())
                 {
                     PostActions(before_actions);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(PASTE_FOCUS_SETTLE_MS));
                 }
 
-                SendText(str);
-                // the browser types one character every 10 ms (key_handler.js handleText);
-                // wait until it's done so e.g. an Enter "after" action doesn't cut the text
-                std::this_thread::sleep_for(std::chrono::milliseconds(std::max<size_t>(750, 250 + str.size() * 12)));
+                // "wait": the browser answers once the last character is typed (it may first
+                // need to take keyboard focus), so the "after" actions never cut the text
+                const int typing_ms = 1000 + static_cast<int>(str.size()) * 50;
+                if (!SendBrowserCommand("text", {{"text", utils::escape_json(str)}, {"wait", "true"}}, typing_ms))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(typing_ms)); // unknown state, be safe
+                std::this_thread::sleep_for(std::chrono::milliseconds(PASTE_TEXT_SETTLE_MS));
 
                 if (!after_actions.empty())
                 {
                     PostActions(after_actions);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(PASTE_AFTER_SETTLE_MS));
                 }
             }
         }).detach();

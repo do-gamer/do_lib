@@ -23,6 +23,7 @@ CLEAN=false
 BUILD_BROWSER=false
 DOCKER_BUILD=false
 IN_CONTAINER=false
+RUN_COPY=true
 
 # parse arguments (allows -c, -b and -d in any order)
 while [[ $# -gt 0 ]]; do
@@ -39,16 +40,21 @@ while [[ $# -gt 0 ]]; do
             DOCKER_BUILD=true
             shift
             ;;
+        --no-copy)
+            RUN_COPY=false
+            shift
+            ;;
         --in-container)
             IN_CONTAINER=true
             shift
             ;;
         *)
-            echo "Usage: $0 [-c] [-b] [-d]"
+            echo "Usage: $0 [-c] [-b] [-d] [--no-copy]"
             echo "  -c: Clean build directory (and browser/dist) before building"
             echo "  -b: Build browser component first"
             echo "  -d: Build the native libraries in Docker (Ubuntu 20.04 toolchain) so they"
             echo "      run on all common distributions (recommended for release builds)"
+            echo "  --no-copy: Don't run copy.sh after the build (e.g. test builds)"
             exit 1
             ;;
     esac
@@ -164,7 +170,9 @@ for lib in "$CLIENT_LIB_DIR/DarkTanos.so" "$DO_LIB_DIR/libdo_lib.so"; do
 done
 
 # if a copy script exists, execute it to move artifacts into darkbot/lib
-if [[ -x "./copy.sh" ]]; then
+if [[ "$RUN_COPY" == "false" ]]; then
+    echo "Skipping copy.sh (--no-copy)"
+elif [[ -x "./copy.sh" ]]; then
     echo "Running copy.sh to transfer build artifacts..."
     ./copy.sh
 elif [[ -f "./copy.sh" ]]; then
