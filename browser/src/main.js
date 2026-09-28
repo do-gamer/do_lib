@@ -154,6 +154,54 @@ function createWindow(url, sid, apiVersion, launchGame = false) {
         }
     });
 
+    // Page load diagnostics and recovery (server lag / outage): log failed, HTTP error and slow
+    // main page loads, and retry failed loads with a growing delay instead of leaving a dead
+    // page until the bot's stuck timer (~150 s) refreshes. Loads that are slow but progressing
+    // are left alone, so a lagging server doesn't get its load restarted over and over.
+    const RETRY_MIN_MS = 10000, RETRY_MAX_MS = 30000, SLOW_LOAD_MS = 20000;
+    const shortUrl = (u) => { try { const p = new URL(u); return p.origin + p.pathname; } catch (e) { return String(u); } };
+    let loadStart = 0, lastHttpCode = 0, loadFailed = false, retryDelay = 0, retryTimer = null;
+
+    const scheduleRetry = (failedUrl, reason) => {
+        if (retryTimer) clearTimeout(retryTimer);
+        retryDelay = retryDelay ? Math.min(retryDelay * 2, RETRY_MAX_MS) : RETRY_MIN_MS;
+        log(`Page load failed: ${reason} (${shortUrl(failedUrl)}), retrying in ${retryDelay / 1000} s`);
+        retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (!window.isDestroyed()) window.loadURL(failedUrl);
+        }, retryDelay);
+    };
+
+    window.webContents.on('did-start-loading', () => {
+        loadStart = Date.now();
+        loadFailed = false;
+        // a new load (refresh, retry) supersedes a pending retry
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    });
+
+    window.webContents.on('did-navigate', (event, navUrl, httpCode, httpStatus) => {
+        lastHttpCode = httpCode;
+        if (httpCode >= 500) scheduleRetry(navUrl, `HTTP ${httpCode} ${httpStatus || ''}`.trim());
+        else if (httpCode >= 400) log(`Page load HTTP ${httpCode} ${httpStatus || ''} (${shortUrl(navUrl)})`);
+    });
+
+    window.webContents.on('did-fail-load', (event, errorCode, errorDescription, failedUrl, isMainFrame) => {
+        // -3 = ERR_ABORTED: replaced by a newer navigation (e.g. a refresh), not a failure
+        if (!isMainFrame || errorCode === -3) return;
+        loadFailed = true;
+        scheduleRetry(failedUrl, `${errorDescription} (${errorCode})`);
+    });
+
+    window.webContents.on('did-finish-load', () => {
+        // Chromium's error page (after did-fail-load) or an HTTP 5xx page also "finish loading";
+        // the retry is already scheduled
+        if (loadFailed || lastHttpCode >= 500) return;
+        const took = Date.now() - loadStart;
+        if (retryDelay) log(`Page loaded after retrying (${(took / 1000).toFixed(1)} s)`);
+        else if (took > SLOW_LOAD_MS) log(`Page loaded slowly: ${(took / 1000).toFixed(1)} s`);
+        retryDelay = 0;
+    });
+
     window.on('unresponsive', () => log("Window unresponsive"));
     window.on('responsive', () => log("Window responsive again"));
 
