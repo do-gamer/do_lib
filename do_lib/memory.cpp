@@ -61,46 +61,30 @@ uintptr_t memory::query_memory(uint8_t *query, const char *mask, uint32_t alignm
 
     const uintptr_t query_addr = reinterpret_cast<uintptr_t>(query);
 
-    static thread_local std::vector<uint8_t> buffer; // reused across threads to avoid repeated allocations
-
     for (const auto &region : get_pages(area))
     {
         const uintptr_t region_size = region.end - region.start;
 
         if (query_size > region_size
-            || (query_addr > region.start && query_addr < region.end)
-            || region.read == '-'
-            || region.name == "[vvar]")
+            || (query_addr >= region.start && query_addr < region.end)
+            || region.read != 'r'
+            || region.name == "[vvar]" || region.name == "[vsyscall]" || region.name == "[vvar_vclock]")
         {
             continue;
         }
 
-        try
-        {
-            buffer.resize(region_size);
-            std::memcpy(buffer.data(), reinterpret_cast<const void *>(region.start), region_size);
-            size_t offset = 0;
+        // search in place (this is our own process): no copy of every region
+        const size_t found = masked_bmh_search(
+            reinterpret_cast<const uint8_t *>(region.start),
+            region_size,
+            reinterpret_cast<const uint8_t *>(query),
+            mask,
+            query_size,
+            0,
+            alignment);
 
-            while (true)
-            {
-                const size_t found = masked_bmh_search(
-                    buffer.data(),
-                    region_size,
-                    reinterpret_cast<const uint8_t *>(query),
-                    mask,
-                    query_size,
-                    offset,
-                    alignment);
-
-                if (found == SIZE_MAX) break;
-                return region.start + found;
-            }
-        }
-        catch (const std::bad_alloc &)
-        {
-            // Skip regions that are too large
-            continue;
-        }
+        if (found != SIZE_MAX)
+            return region.start + found;
     }
 
     return 0ULL;

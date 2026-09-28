@@ -1,8 +1,12 @@
 project(DarkTanos LANGUAGES CXX)
 
-find_package(JNI REQUIRED)
+# Only the JNI headers are needed (no libjvm/AWT linking); headless JDKs are fine.
+find_package(JNI QUIET)
+if(NOT JAVA_INCLUDE_PATH OR NOT JAVA_INCLUDE_PATH2)
+    message(FATAL_ERROR "JDK headers (jni.h) not found, install a JDK or set JAVA_HOME")
+endif()
 
-include_directories(${PROJECT_NAME} PRIVATE ${JNI_INCLUDE_DIRS})
+include_directories(${JAVA_INCLUDE_PATH} ${JAVA_INCLUDE_PATH2})
 
 add_definitions(-DAPI_VERSION=${API_VERSION})
 
@@ -10,6 +14,10 @@ set(BROWSER_APPIMAGE_PATH "${CMAKE_SOURCE_DIR}/browser/dist/darkbot_browser_linu
 if(NOT EXISTS "${BROWSER_APPIMAGE_PATH}")
     message(FATAL_ERROR "Required browser AppImage not found: ${BROWSER_APPIMAGE_PATH}")
 endif()
+
+# re-run configure whenever the AppImage changes, otherwise a stale hash gets embedded and
+# the client refuses to launch a freshly built browser
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${BROWSER_APPIMAGE_PATH}")
 
 execute_process(
     COMMAND sh -c "sha256sum '${BROWSER_APPIMAGE_PATH}' | awk '{print \$1}'"
@@ -32,12 +40,17 @@ add_library(${PROJECT_NAME} SHARED
     bot_client.cpp
     proc_util.cpp
     sock_ipc.cpp
+    flash_ipc_client.cpp
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE BROWSER_APPIMAGE_SHA256="${BROWSER_APPIMAGE_SHA256}")
 
 find_package(X11 REQUIRED)
 target_include_directories(${PROJECT_NAME} PRIVATE ${X11_INCLUDE_DIR})
-target_link_libraries(${PROJECT_NAME} PRIVATE ${X11_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${X11_LIBRARIES} ${X11_Xext_LIB} pthread ${CMAKE_DL_LIBS})
 
-target_compile_options(${PROJECT_NAME} PRIVATE -std=c++17)
+target_compile_options(${PROJECT_NAME} PRIVATE -Wall)
+
+# export only the JNI entry points
+target_link_options(${PROJECT_NAME} PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map)
+set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/exports.map)

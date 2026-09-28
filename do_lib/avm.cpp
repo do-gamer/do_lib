@@ -1,8 +1,13 @@
 #include "avm.h"
 #include "binary_stream.h"
 #include "utils.h"
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
+
+// Bumped whenever the VM frees memory; caches keyed by VM pointers are dropped lazily
+// on their next use instead of doing work inside the GC free path.
+static std::atomic<uint32_t> g_cache_generation { 0 };
 
 avm::ClassClosure * avm::AbcEnv::finddef(const std::string &name)
 {
@@ -43,10 +48,17 @@ std::string avm::MethodInfo::name()
 {
     static std::mutex cache_mutex;
     static std::unordered_map<const avm::MethodInfo *, std::string> cache;
+    static uint32_t cache_generation = 0;
 
     // quick-path: check cache under lock, but do expensive work outside
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
+        uint32_t generation = g_cache_generation.load(std::memory_order_relaxed);
+        if (generation != cache_generation)
+        {
+            cache.clear();
+            cache_generation = generation;
+        }
         auto it = cache.find(this);
         if (it != cache.end())
             return it->second;
@@ -175,24 +187,29 @@ std::string avm::MethodInfo::name()
     // insert final resolved name into cache and return
     {
         std::lock_guard<std::mutex> lock(cache_mutex);
-        auto [it, inserted] = cache.try_emplace(this, resolved_name);
-        if (!inserted)
-            return it->second;
-        return it->second;
+        return cache.try_emplace(this, resolved_name).first->second;
     }
 }
 
-#include <mutex>
-#include <unordered_map>
-
 static std::mutex g_traits_cache_mutex;
 static std::unordered_map<const avm::Traits *, avm::MyTraits> g_traits_cache;
+static uint32_t g_traits_cache_generation = 0;
 
 avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
 {
+    // the cache only holds traits resolved against their own pool
+    const bool use_cache = custom_pool == nullptr || custom_pool == pool;
+
     // fast-path: check global cache
+    if (use_cache)
     {
         std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
+        uint32_t generation = g_cache_generation.load(std::memory_order_relaxed);
+        if (generation != g_traits_cache_generation)
+        {
+            g_traits_cache.clear();
+            g_traits_cache_generation = generation;
+        }
         auto it = g_traits_cache.find(this);
         if (it != g_traits_cache.end())
         {
@@ -303,6 +320,7 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
     }
 
     // insert into cache
+    if (use_cache)
     {
         std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
         g_traits_cache.try_emplace(this, traits);
@@ -313,7 +331,6 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
 
 void avm::clear_traits_cache()
 {
-    std::lock_guard<std::mutex> lock(g_traits_cache_mutex);
-    g_traits_cache.clear();
+    g_cache_generation.fetch_add(1, std::memory_order_relaxed);
 }
 

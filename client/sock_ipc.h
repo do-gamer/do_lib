@@ -2,33 +2,33 @@
 #define SOCK_IPC_H
 #include <string>
 
-
-
+// Unix domain socket connection to the browser's command server.
+// Messages are newline delimited in both directions.
 class SockIpc
 {
 public:
     SockIpc();
     ~SockIpc();
 
-    bool Connected() const { return m_connected; }
+    bool Connected() const { return m_sock != -1; }
 
     // try to establish a connection to the unix domain socket at |path|.
-    // if a previous socket exists it will be closed and recreated.  returns
-    // true on success, false otherwise.
+    // if a previous socket exists it will be closed and recreated.
     bool Connect(const std::string &path);
 
-    // send a message over the socket. returns true on success; if the write
-    // fails (broken pipe, connection reset, etc) the object will mark itself
-    // disconnected so callers can attempt to reconnect.
-    bool Send(const std::string &msg);
+    void Close();
 
-    // try to read a message from the socket. returns true if any data was read.
-    // the call is non‑blocking and will mark the object disconnected on failure.
-    bool Recv(std::string &msg);
+    // send one message (a trailing newline is appended). On failure the
+    // connection is closed so callers can reconnect.
+    bool Send(const std::string &msg, int timeout_ms);
 
-    // internal state; public for legacy code but should not be touched
-    bool m_connected = false;
+    // wait up to |timeout_ms| for the next complete line (without the newline).
+    // returns false on timeout or when the connection breaks.
+    bool RecvLine(std::string &line, int timeout_ms);
+
+private:
     int m_sock = -1;
+    std::string m_buffer;
 };
 
 #endif // SOCK_IPC_H

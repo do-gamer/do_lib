@@ -2,30 +2,91 @@
 #include "eu_darkbot_api_DarkTanos.h"
 #include <unistd.h>
 #include <cstring>
+#include <algorithm>
 #include <vector>
 
 #include "bot_client.h"
 #include "utils.h"
 
-static BotClient client;
+// Never destroyed: native threads (paste worker, marker, JNI callers) may still use it
+// while the JVM exits. The browser is stopped from an exit handler instead.
+static BotClient &client = *new BotClient();
+
+namespace
+{
+    // RAII wrapper so every GetStringUTFChars is released (previously several calls leaked
+    // on every invocation, e.g. sendNotification runs for every entity selection).
+    class JString
+    {
+    public:
+        JString(JNIEnv *env, jstring str) : m_env(env), m_str(str),
+            m_chars(str ? env->GetStringUTFChars(str, nullptr) : nullptr) { }
+        ~JString()
+        {
+            if (m_chars)
+                m_env->ReleaseStringUTFChars(m_str, m_chars);
+        }
+        JString(const JString &) = delete;
+        JString &operator=(const JString &) = delete;
+
+        std::string str() const { return m_chars ? std::string(m_chars) : std::string(); }
+    private:
+        JNIEnv *m_env;
+        jstring m_str;
+        const char *m_chars;
+    };
+
+    std::vector<uintptr_t> to_vector(JNIEnv *env, jlongArray array)
+    {
+        std::vector<uintptr_t> out;
+        if (!array)
+            return out;
+        jsize len = env->GetArrayLength(array);
+        if (len > 0)
+        {
+            out.resize(static_cast<size_t>(len));
+            env->GetLongArrayRegion(array, 0, len, reinterpret_cast<jlong *>(out.data()));
+        }
+        return out;
+    }
+
+    jlongArray to_jarray(JNIEnv *env, const std::vector<uintptr_t> &values)
+    {
+        jlongArray addresses = env->NewLongArray(static_cast<jsize>(values.size()));
+        if (addresses && !values.empty())
+            env->SetLongArrayRegion(addresses, 0, static_cast<jsize>(values.size()), reinterpret_cast<const jlong *>(values.data()));
+        return addresses;
+    }
+
+    // Reads straight into the Java array (no intermediate buffer); unread bytes are zeroed.
+    void read_into(JNIEnv *env, jbyteArray array, jlong address, jsize length)
+    {
+        if (length <= 0)
+            return;
+
+        void *data = env->GetPrimitiveArrayCritical(array, nullptr);
+        if (!data)
+            return;
+
+        ssize_t n = ProcUtil::ReadMemoryBytes(client.FlashPid(), static_cast<uintptr_t>(address), data, static_cast<size_t>(length));
+        size_t got = n > 0 ? static_cast<size_t>(n) : 0;
+        if (got < static_cast<size_t>(length))
+            std::memset(static_cast<uint8_t *>(data) + got, 0, static_cast<size_t>(length) - got);
+
+        env->ReleasePrimitiveArrayCritical(array, data, 0);
+    }
+}
 
 __attribute__((constructor)) static void lib_ctor()
 {
     utils::log_timestamp_str(); // force timestamp init before any log call
+    atexit([] { client.Shutdown(); });
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setData
   (JNIEnv *env, jobject, jstring jurl, jstring jsid, jstring preloader, jstring vars)
 {
-    std::string temp_sid, temp_url;
-
-    const char *sid_cstr = env->GetStringUTFChars(jsid , NULL);
-    const char *url_cstr = env->GetStringUTFChars(jurl, NULL);
-
-    client.SetCredentials(sid_cstr, url_cstr);
-
-    env->ReleaseStringUTFChars(jurl, url_cstr);
-    env->ReleaseStringUTFChars(jsid, sid_cstr);
+    client.SetCredentials(JString(env, jsid).str(), JString(env, jurl).str());
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_createWindow
@@ -96,31 +157,16 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_keyClick
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_sendText
   (JNIEnv *env, jobject, jstring jtext)
 {
-    const char *cstr = env->GetStringUTFChars(jtext, NULL);
-    std::string text = cstr;
-    env->ReleaseStringUTFChars(jtext, cstr);
-    client.SendText(text);
+    client.SendText(JString(env, jtext).str());
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_pasteText
   (JNIEnv *env, jobject, jstring jtext, jlongArray jactions)
 {
-    // convert string
-    const char *cstr = env->GetStringUTFChars(jtext, NULL);
-    std::string text = cstr;
-    env->ReleaseStringUTFChars(jtext, cstr);
+    auto values = to_vector(env, jactions);
+    std::vector<uint64_t> actions(values.begin(), values.end());
 
-    // convert actions array
-    std::vector<uint64_t> actions;
-    if (jactions) {
-        jsize len = env->GetArrayLength(jactions);
-        if (len > 0) {
-            actions.resize(static_cast<size_t>(len));
-            env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
-        }
-    }
-
-    client.PasteText(text, actions);
+    client.PasteText(JString(env, jtext).str(), actions);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_mouseMove
@@ -157,17 +203,8 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_setCursorMarker
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_postActions
   (JNIEnv *env, jobject, jlongArray jactions)
 {
-    if (!jactions)
-        return;
-
-    jsize len = env->GetArrayLength(jactions);
-    if (len <= 0)
-        return;
-
-    std::vector<uint64_t> actions(static_cast<size_t>(len));
-    env->GetLongArrayRegion(jactions, 0, len, reinterpret_cast<jlong*>(actions.data()));
-
-    client.PostActions(actions);
+    auto values = to_vector(env, jactions);
+    client.PostActions(std::vector<uint64_t>(values.begin(), values.end()));
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_readInt
@@ -195,21 +232,23 @@ JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_readBoolean
 }
 
 JNIEXPORT jbyteArray JNICALL Java_eu_darkbot_api_DarkTanos_readBytes__JI
-  (JNIEnv *env, jobject, jlong jaddr, jint jsize)
+  (JNIEnv *env, jobject, jlong jaddr, jint jlength)
 {
-    std::vector<uint8_t> stuff(jsize);
-    size_t bytes_read = ProcUtil::ReadMemoryBytes(client.FlashPid(), jaddr, &stuff[0], stuff.size());
-    jbyteArray barray = env->NewByteArray(jsize);
-    env->SetByteArrayRegion(barray, 0, jsize, (jbyte*)(&stuff[0]));
+    jsize size = jlength > 0 ? jlength : 0;
+    jbyteArray barray = env->NewByteArray(size);
+    if (barray)
+        read_into(env, barray, jaddr, size);
     return barray;
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_readBytes__J_3BI
-  (JNIEnv *env, jobject, jlong jaddr, jbyteArray jout, jint jsize)
+  (JNIEnv *env, jobject, jlong jaddr, jbyteArray jout, jint jlength)
 {
-    std::vector<uint8_t> stuff(env->GetArrayLength(jout));
-    size_t bytes_read = ProcUtil::ReadMemoryBytes(client.FlashPid(), jaddr, &stuff[0], stuff.size());
-    env->SetByteArrayRegion(jout, 0, jsize, (jbyte*)(&stuff[0]));
+    if (!jout)
+        return;
+    // previously read the whole buffer (not |length|) and threw when length > buffer length
+    jsize size = std::min<jsize>(jlength, env->GetArrayLength(jout));
+    read_into(env, jout, jaddr, size);
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_replaceInt
@@ -222,7 +261,7 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_replaceInt
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_replaceLong
   (JNIEnv *, jobject, jlong jaddr, jlong jold, jlong jnew)
 {
-    if (client.Read<uintptr_t>(jaddr) == jold)
+    if (client.Read<jlong>(jaddr) == jold)
         client.Write(jaddr, jnew);
 }
 
@@ -267,58 +306,56 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_writeBoolean
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_writeBytes
   (JNIEnv *env, jobject, jlong jaddr, jbyteArray jval)
 {
-    std::vector<uint8_t> data(env->GetArrayLength(jval));
+    if (!jval)
+        return;
+    jsize size = env->GetArrayLength(jval);
+    if (size <= 0)
+        return;
 
-    env->GetByteArrayRegion(jval, 0, data.size(), reinterpret_cast<jbyte*>(&data[0]));
-    ProcUtil::WriteMemoryBytes(client.FlashPid(), jaddr, &data[0], data.size());
+    void *data = env->GetPrimitiveArrayCritical(jval, nullptr);
+    if (!data)
+        return;
+    ProcUtil::WriteMemoryBytes(client.FlashPid(), static_cast<uintptr_t>(jaddr), data, static_cast<size_t>(size));
+    env->ReleasePrimitiveArrayCritical(jval, data, JNI_ABORT);
 }
 
 JNIEXPORT jlongArray JNICALL Java_eu_darkbot_api_DarkTanos_queryInt
   (JNIEnv *env, jobject, jint jquery, jint jamount)
 {
-    auto out = client.QueryMemory(reinterpret_cast<uint8_t *>(&jquery), sizeof(jquery), static_cast<uint32_t>(jamount));
-    jlongArray addresses = env->NewLongArray(out.size());
-    env->SetLongArrayRegion(addresses, (jsize)0, (jsize)out.size(), reinterpret_cast<jlong*>(&out[0]));
-    return addresses;
+    if (jamount <= 0)
+        return env->NewLongArray(0);
+    auto out = client.QueryMemory(reinterpret_cast<const uint8_t *>(&jquery), sizeof(jquery), static_cast<size_t>(jamount));
+    return to_jarray(env, out);
 }
 
 JNIEXPORT jlongArray JNICALL Java_eu_darkbot_api_DarkTanos_queryLong
   (JNIEnv *env, jobject, jlong jquery, jint jamount)
 {
-    auto out = client.QueryMemory(reinterpret_cast<uint8_t *>(&jquery), sizeof(jquery), static_cast<uint32_t>(jamount));
-    jlongArray addresses = env->NewLongArray(out.size());
-    env->SetLongArrayRegion(addresses, (jsize)0, (jsize)out.size(), reinterpret_cast<jlong*>(&out[0]));
-    return addresses;
+    if (jamount <= 0)
+        return env->NewLongArray(0);
+    auto out = client.QueryMemory(reinterpret_cast<const uint8_t *>(&jquery), sizeof(jquery), static_cast<size_t>(jamount));
+    return to_jarray(env, out);
 }
 
 JNIEXPORT jlongArray JNICALL Java_eu_darkbot_api_DarkTanos_queryBytes
   (JNIEnv * env, jobject, jbyteArray jquery, jint jamount)
 {
-    size_t query_size = env->GetArrayLength(jquery);
+    jsize query_size = jquery ? env->GetArrayLength(jquery) : 0;
+    if (query_size <= 0 || jamount <= 0)
+        return env->NewLongArray(0);
 
-    std::vector<uint8_t> query(query_size);
+    std::vector<uint8_t> query(static_cast<size_t>(query_size));
+    env->GetByteArrayRegion(jquery, 0, query_size, reinterpret_cast<jbyte*>(query.data()));
 
-    env->GetByteArrayRegion(jquery, 0, query_size, reinterpret_cast<jbyte*>(&query[0]));
-
-    auto out = client.QueryMemory(query, jamount);
-    
-    jlongArray addresses = env->NewLongArray(out.size());
-    env->SetLongArrayRegion(addresses, (jsize)0, (jsize)out.size(), reinterpret_cast<jlong*>(&out[0]));
-
-    return addresses;
+    auto out = client.QueryMemory(query.data(), query.size(), static_cast<size_t>(jamount));
+    return to_jarray(env, out);
 }
 
 
 JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_sendNotification
   (JNIEnv *env, jobject, jlong screen_manager, jstring jname, jlongArray jargs)
 {
-    std::vector<uintptr_t> args(env->GetArrayLength(jargs));
-
-    env->GetLongArrayRegion(jargs, 0, args.size(), reinterpret_cast<jlong *>(&args[0]));
-
-    std::string name(env->GetStringUTFChars(jname, NULL));
-
-    return client.SendNotification(screen_manager, name, args);
+    return client.SendNotification(screen_manager, JString(env, jname).str(), to_vector(env, jargs));
 }
 
 JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_selectEntity
@@ -336,29 +373,18 @@ JNIEXPORT void JNICALL Java_eu_darkbot_api_DarkTanos_refine
 JNIEXPORT jboolean JNICALL Java_eu_darkbot_api_DarkTanos_useItem
   (JNIEnv *env, jobject, jlong conn_manager, jstring jname, jint jdunno, jlongArray jargs)
 {
-    std::vector<uintptr_t> args(env->GetArrayLength(jargs));
-    env->GetLongArrayRegion(jargs, 0, args.size(), reinterpret_cast<jlong *>(&args[0]));
-    return client.UseItem(env->GetStringUTFChars(jname, NULL), 1, 0);
+    return client.UseItem(JString(env, jname).str(), 1, 0);
 }
 
 JNIEXPORT jlong JNICALL Java_eu_darkbot_api_DarkTanos_callMethod
   (JNIEnv *env, jobject, jlong jthis, jint jindex, jlongArray jargs)
 {
-    std::vector<uintptr_t> args(env->GetArrayLength(jargs));
-
-    env->GetLongArrayRegion(jargs, 0, args.size(), reinterpret_cast<jlong *>(&args[0]));
-    return client.CallMethod(jthis, jindex, args);
+    return client.CallMethod(jthis, jindex, to_vector(env, jargs));
 }
 
 JNIEXPORT jint JNICALL Java_eu_darkbot_api_DarkTanos_checkMethodSignature
   (JNIEnv *env, jobject, jlong object, jint index, jboolean check_name, jstring sig)
 {
-    const char *sig_cstr = env->GetStringUTFChars(sig, NULL);
-
-    int result = client.CheckMethodSignature(object, index, check_name, sig_cstr);
-
-    env->ReleaseStringUTFChars(sig, sig_cstr);
-
-    return result;
+    return client.CheckMethodSignature(object, index, check_name, JString(env, sig).str());
 }
 

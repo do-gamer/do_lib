@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -12,6 +13,9 @@
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -56,12 +60,12 @@ namespace utils
         return path;
     }
 
-    static inline void format(std::stringstream &of, const char *data)
+    inline void format(std::stringstream &of, const char *data)
     {
         of << data;
     }
 
-    static inline std::string format(const char *data)
+    inline std::string format(const char *data)
     {
         std::stringstream ss;
         format(ss, data);
@@ -69,7 +73,7 @@ namespace utils
     }
 
     template <typename T, typename... Args>
-    static void format(std::stringstream &of, const char *s, T value, Args... args)
+    void format(std::stringstream &of, const char *s, T value, Args... args)
     {
         const char *start = s;
         for (; *s != 0; s++)
@@ -105,7 +109,7 @@ namespace utils
     }
 
     template <typename T, typename... Args>
-    static inline std::string format(const char *s, T value, Args... args)
+    inline std::string format(const char *s, T value, Args... args)
     {
         std::stringstream ss;
         format(ss, s, value, args...);
@@ -113,30 +117,51 @@ namespace utils
     }
 
     template <typename T, typename... Args>
-    static inline std::string format(const std::string &s, T value, Args... args)
+    inline std::string format(const std::string &s, T value, Args... args)
     {
         return format(s.c_str(), value, args...);
     }
 
-    static inline void log(const char *data)
+    // One write() per line on an O_APPEND descriptor: lines from different threads and
+    // processes (client, browser, flash) never interleave, and there's no iostream setup.
+    inline void log(const char *data)
     {
-        const std::string &path = get_log_file_path();
-        if (path.empty()) return;
+        static const int fd = []
+        {
+            const std::string &path = get_log_file_path();
+            return path.empty() ? -1 : ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        }();
+        if (fd < 0) return;
+
         std::time_t t = std::time(nullptr);
         std::tm tm{};
         localtime_r(&t, &tm);
-        std::ofstream fhandle{path, std::ios::app};
-        fhandle << std::put_time(&tm, "[%Y-%m-%d %H:%M:%S] ") << data;
+
+        char line[2048];
+        size_t n = std::strftime(line, sizeof(line), "[%Y-%m-%d %H:%M:%S] ", &tm);
+        size_t len = std::strlen(data);
+        if (len > sizeof(line) - n)
+        {
+            // truncated: keep the line terminated so the next entry starts on its own line
+            len = sizeof(line) - n;
+            std::memcpy(line + n, data, len);
+            line[sizeof(line) - 1] = '\n';
+        }
+        else
+            std::memcpy(line + n, data, len);
+
+        ssize_t ignored = ::write(fd, line, n + len);
+        (void)ignored;
     }
 
     template <typename T, typename... Args>
-    static inline void log(const char *s, T value, Args... args)
+    inline void log(const char *s, T value, Args... args)
     {
         std::string formatted = format(s, value, args...);
         log(formatted.c_str());
     }
 
-    static inline std::string escape_json(const std::string& s)
+    inline std::string escape_json(const std::string& s)
     {
         std::string res = "\"";
         for (char c : s) {
