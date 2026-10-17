@@ -11,6 +11,7 @@
 #include <thread>
 #include <chrono>
 #include <climits>
+#include <locale>
 #include <vector>
 #include <sstream>
 #include <string_view>
@@ -61,6 +62,11 @@ namespace
 
     constexpr int BROWSER_SEND_TIMEOUT_MS = 250;
     constexpr int BROWSER_ACK_TIMEOUT_MS = 1500;
+
+    // Re-query the browser's scale (display scale factor * page zoom) at most this often; the
+    // query runs in front of a mouse action, so it gets a short ack timeout.
+    constexpr uint64_t BROWSER_SCALE_TTL_MS = 2000;
+    constexpr int BROWSER_SCALE_ACK_TIMEOUT_MS = 300;
 
     // Text paste (group invite, chat): let the game focus the input field after the "before"
     // clicks, and let the typed text settle before the "after" actions (e.g. the Invite button).
@@ -480,6 +486,15 @@ namespace window
 
 namespace mouse
 {
+    /**
+     * Converts a game coordinate (DIPs) to window pixels: on HiDPI displays (and with page zoom)
+     * the browser renders the page scaled, X11 events are in physical window pixels.
+     */
+    inline int32_t to_window(int32_t v, double scale)
+    {
+        return static_cast<int32_t>(std::lround(v * scale));
+    }
+
     struct EventContext
     {
         Display *display;
@@ -595,17 +610,19 @@ namespace mouse
     }
 
     /**
-     * Sends a mouse wheel event.
+     * Sends a mouse wheel event, moving the mouse there first: the flash player scrolls whatever
+     * is under its own mouse position (pepper wheel events carry none), so without the move the
+     * wheel lands where the previous mouse event was.
      */
     bool send_wheel(Display *display, Window window, int32_t x, int32_t y, int button)
     {
-        return send_button(display, window, x, y, button, true, true);
+        return send_move(display, window, x, y) && send_button(display, window, x, y, button, true, true);
     }
 }
 
 namespace cursor_marker
 {
-    static constexpr int dot_size = 6; // 6x6 marker size
+    static constexpr int dot_size = 6; // 6x6 marker size (DIPs, scaled like the coordinates)
     static constexpr const char *dot_color = "red";
 
     // State for the cursor marker, including whether it's enabled.
@@ -615,6 +632,7 @@ namespace cursor_marker
         Display *display = nullptr;
         Window window = 0;
         Window parent = 0;
+        int size = 0;
         std::chrono::steady_clock::time_point last_time;
         std::atomic<bool> clear_scheduled { false };
         std::mutex mutex;
@@ -644,7 +662,7 @@ namespace cursor_marker
      * This is useful for debugging and visualizing where the bot is "clicking" on the screen.
      * Requires state.mutex.
      */
-    void create(Window parent)
+    void create(Window parent, int size)
     {
         if (!parent)
             return;
@@ -674,13 +692,14 @@ namespace cursor_marker
         state.window = XCreateWindow(
             state.display,
             parent,
-            0, 0, dot_size, dot_size, 0,
+            0, 0, size, size, 0,
             CopyFromParent,
             InputOutput,
             CopyFromParent,
             mask,
             &attr);
         state.parent = parent;
+        state.size = size;
 
         // make the window input-transparent so it doesn't grab events
         int shape_event, shape_error;
@@ -726,9 +745,9 @@ namespace cursor_marker
     }
 
     /**
-     * Updates the position of the cursor marker to the given coordinates.
+     * Updates the position of the cursor marker to the given window pixel coordinates.
      */
-    void update(int x, int y, int flash_pid, int browser_pid)
+    void update(int x, int y, int size, int flash_pid, int browser_pid)
     {
         if (!state.enabled || flash_pid <= 0 || !window::x11_control_available())
             return;
@@ -738,12 +757,17 @@ namespace cursor_marker
             state.last_time = std::chrono::steady_clock::now();
 
             if (!state.window || !state.display || state.parent != browser)
-                create(browser);
+                create(browser, size);
+            else if (state.size != size)
+            {
+                XResizeWindow(state.display, state.window, size, size);
+                state.size = size;
+            }
 
             if (!state.window || !state.display)
                 return false;
 
-            const int offset = dot_size / 2;
+            const int offset = size / 2;
             XMoveWindow(state.display, state.window, x - offset, y - offset);
             XMapRaised(state.display, state.window);
             XFlush(state.display);
@@ -1300,7 +1324,8 @@ static std::string build_browser_command_json(uint32_t id, const std::string &cm
  * Params format: {"arg1": "value1", "arg2": "value2"} which gets converted to JSON and sent to the browser.
  * Values must already be valid JSON (numbers or escaped strings).
  */
-bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params, int ack_timeout_ms)
+bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params, int ack_timeout_ms,
+                                   std::string *reply)
 {
     std::lock_guard<std::recursive_mutex> lock(m_browser_mutex);
 
@@ -1335,7 +1360,8 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
         return false;
     }
 
-    // replies are "<id>|ok" / "<id>|err"; skip stale replies of earlier timed-out commands
+    // replies are "<id>|ok" / "<id>|ok|<value>" / "<id>|err"; skip stale replies of earlier
+    // timed-out commands
     const auto deadline = std::chrono::steady_clock::now()
         + std::chrono::milliseconds(ack_timeout_ms > 0 ? ack_timeout_ms : BROWSER_ACK_TIMEOUT_MS);
     std::string line;
@@ -1347,8 +1373,14 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
 
         if (line.rfind(id_prefix, 0) == 0)
         {
-            if (line.compare(id_prefix.size(), std::string::npos, "ok") == 0)
+            std::string_view status(line);
+            status.remove_prefix(id_prefix.size());
+            if (status == "ok" || status.rfind("ok|", 0) == 0)
+            {
+                if (reply)
+                    reply->assign(status.size() > 3 ? status.substr(3) : std::string_view());
                 return true;
+            }
 
             utils::log("[SendBrowserCommand] browser rejected '{}': {}\n", cmd, line);
             return false;
@@ -1357,6 +1389,49 @@ bool BotClient::SendBrowserCommand(const std::string &cmd, std::initializer_list
 
     utils::log("[SendBrowserCommand] no ack for '{}'\n", json);
     return false;
+}
+
+/**
+ * Browser window pixels per game coordinate: the browser renders the page scaled on HiDPI
+ * displays (e.g. Xft.dpi 192 -> 2) and with page zoom, the bot's coordinates stay in DIPs.
+ * Cached; on any failure the last known value (1.0 at first) is kept.
+ * Takes m_browser_mutex: never call it while holding window::x_mutex.
+ */
+double BotClient::browser_scale()
+{
+    const double cached = m_browser_scale.load();
+    const uint64_t queried = m_browser_scale_ms.load();
+    if (queried && now_ms() - queried < BROWSER_SCALE_TTL_MS)
+        return cached;
+
+    // Mouse input mustn't wait behind another thread busy with the browser (e.g. a text paste
+    // waiting for its ack), and without a game there's nothing to click (and SendBrowserCommand
+    // would relaunch a dead browser).
+    std::unique_lock<std::recursive_mutex> lock(m_browser_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || FlashPid() <= 0 || Pid() <= 0)
+        return cached;
+
+    m_browser_scale_ms = now_ms(); // also on failures, so they aren't retried on every mouse action
+
+    std::string reply;
+    if (!SendBrowserCommand("getScale", {}, BROWSER_SCALE_ACK_TIMEOUT_MS, &reply))
+        return cached;
+
+    double scale = 0;
+    std::istringstream in(reply);
+    in.imbue(std::locale::classic());
+    if (!(in >> scale) || !std::isfinite(scale) || scale <= 0)
+    {
+        utils::log("[BrowserScale] invalid scale '{}'\n", reply);
+        return cached;
+    }
+
+    if (scale != cached)
+    {
+        utils::log("[BrowserScale] {}\n", scale);
+        m_browser_scale = scale;
+    }
+    return scale;
 }
 
 bool BotClient::find_flash_process()
@@ -1419,6 +1494,7 @@ void BotClient::reset()
     m_flash_ipc.Reset(FlashPid(), true);
     SetFlashPid(-1);
     m_last_flash_scan_ms = 0;
+    m_browser_scale_ms = 0; // the browser may have been relaunched
 }
 
 /**
@@ -1592,60 +1668,78 @@ bool BotClient::MouseClickLegacy(int32_t x, int32_t y)
     return SendFlashCommand(message);
 }
 
+// The X11 mouse functions get game coordinates (DIPs) and send window pixels. The scale is
+// queried before with_browser: browser_scale() takes m_browser_mutex, with_browser x_mutex.
+
 void BotClient::MouseClick(int32_t x, int32_t y)
 {
+    const double scale = browser_scale();
+    const int32_t wx = mouse::to_window(x, scale), wy = mouse::to_window(y, scale);
+
     // First try sending click via X11 for better compatibility with all game actions
     bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        return mouse::send_button(display, browser, x, y, Button1, true, true);
+        return mouse::send_button(display, browser, wx, wy, Button1, true, true);
     });
 
-    // If X11 method failed, fall back to legacy flash IPC method.
+    // If X11 method failed, fall back to legacy flash IPC method (game coordinates).
     if (!success)
         success = MouseClickLegacy(x, y);
 
     if (success)
-        UpdateCursorMarker(x, y);
+        UpdateCursorMarker(wx, wy);
 }
 
 void BotClient::MouseMove(int32_t x, int32_t y)
 {
+    const double scale = browser_scale();
+    const int32_t wx = mouse::to_window(x, scale), wy = mouse::to_window(y, scale);
+
     bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        return mouse::send_move(display, browser, x, y);
+        return mouse::send_move(display, browser, wx, wy);
     });
 
     if (success)
-        UpdateCursorMarker(x, y);
+        UpdateCursorMarker(wx, wy);
 }
 
 void BotClient::MouseDown(int32_t x, int32_t y)
 {
+    const double scale = browser_scale();
+    const int32_t wx = mouse::to_window(x, scale), wy = mouse::to_window(y, scale);
+
     bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        return mouse::send_button(display, browser, x, y, Button1, true, false);
+        return mouse::send_button(display, browser, wx, wy, Button1, true, false);
     });
 
     if (success)
-        UpdateCursorMarker(x, y);
+        UpdateCursorMarker(wx, wy);
 }
 
 void BotClient::MouseUp(int32_t x, int32_t y)
 {
+    const double scale = browser_scale();
+    const int32_t wx = mouse::to_window(x, scale), wy = mouse::to_window(y, scale);
+
     bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        return mouse::send_button(display, browser, x, y, Button1, false, true);
+        return mouse::send_button(display, browser, wx, wy, Button1, false, true);
     });
 
     if (success)
-        UpdateCursorMarker(x, y);
+        UpdateCursorMarker(wx, wy);
 }
 
 void BotClient::MouseScroll(int32_t x, int32_t y, int32_t delta)
 {
+    const double scale = browser_scale();
+    const int32_t wx = mouse::to_window(x, scale), wy = mouse::to_window(y, scale);
+
     int button = delta >= 0 ? Button4 : Button5;
     bool success = window::with_browser(FlashPid(), Pid(), [=](Display *display, Window browser) {
-        return mouse::send_wheel(display, browser, x, y, button);
+        return mouse::send_wheel(display, browser, wx, wy, button);
     });
 
     if (success)
-        UpdateCursorMarker(x, y);
+        UpdateCursorMarker(wx, wy);
 }
 
 // process a batch of encoded native actions.
@@ -1811,5 +1905,6 @@ void BotClient::EnableCursorMarker(bool enable)
 
 void BotClient::UpdateCursorMarker(int32_t x, int32_t y)
 {
-    cursor_marker::update(x, y, FlashPid(), Pid());
+    const int size = std::max(1, static_cast<int>(std::lround(cursor_marker::dot_size * m_browser_scale.load())));
+    cursor_marker::update(x, y, size, FlashPid(), Pid());
 }

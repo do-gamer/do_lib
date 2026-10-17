@@ -136,6 +136,17 @@ int main()
         CHECK(command(sock, "keyClick", ",\"key\":72") == "ok");
     });
 
+    suite.run("commands can answer with a value, plain ok/err unchanged", [&]
+    {
+        CHECK(command(sock, "value") == "ok|1.25");
+        CHECK(command(sock, "asyncvalue") == "ok|done");
+        // a newline in the value must not break the line framing
+        CHECK(command(sock, "multiline") == "ok|a b  c");
+        CHECK(command(sock, "object") == "err");
+        CHECK(command(sock, "keyClick", ",\"key\":73") == "ok");
+        CHECK(command(sock, "fail") == "err");
+    });
+
     suite.run("text with quotes, backslashes and unicode survives", [&]
     {
         CHECK(command(sock, "text", ",\"text\":\"a \\\"quoted\\\" \\\\ path \\u00e9\"") == "ok");

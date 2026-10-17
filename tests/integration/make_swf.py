@@ -14,6 +14,18 @@ Document class (hand-assembled ABC):
 
 Loading it makes the flash plugin JIT-verify our methods (do_lib's verify_jit hook) and
 free GC chunks (free_chunk hook) inside the real player.
+
+With --report-input (mouse test) the constructor also does
+
+                stage.scaleMode = "noScale"; stage.align = "TL";    // stage units = CSS px
+                for each type in [mouseMove, mouseDown, mouseUp, click, mouseWheel]:
+                    stage.addEventListener(type, onEvent);
+            public function onEvent(e:*):void {
+                ExternalInterface.call("report", "flash " + e.type + " " + e.stageX + "," + e.stageY + " " + e.delta);
+            }
+
+so the page sees every mouse event as the player gets it (a wheel event goes to whatever
+is under the player's own mouse position, it carries no position from the browser).
 """
 import struct
 import sys
@@ -91,9 +103,12 @@ PUSHSCOPE, POPSCOPE, RETURNVOID, POP = 0x30, 0x1D, 0x47, 0x29
 CONSTRUCTSUPER, GETLEX, NEWCLASS, INITPROPERTY = 0x49, 0x60, 0x58, 0x68
 GETSCOPEOBJECT, PUSHBYTE, PUSHINT, FINDPROPSTRICT = 0x65, 0x24, 0x2D, 0x5D
 CONSTRUCTPROP, INCLOCAL_I, JUMP, IFLT, LABEL = 0x4A, 0xC2, 0x10, 0x15, 0x09
+PUSHSTRING, DUP, ADD, GETPROPERTY, SETPROPERTY, CALLPROPVOID = 0x2C, 0x2A, 0xA0, 0x66, 0x61, 0x4F
+
+INPUT_EVENTS = ['mouseMove', 'mouseDown', 'mouseUp', 'click', 'mouseWheel']
 
 
-def build_abc():
+def build_abc(report_input=False):
     abc = Abc()
     main = abc.qname('', 'Main')
     chain = [
@@ -120,6 +135,27 @@ def build_abc():
     ctor += cond
     iflt_pos = len(ctor) + 4                               # offset is relative to the next instruction
     ctor += bytes([IFLT]) + s24(body_start - iflt_pos)
+
+    if report_input:
+        on_event = abc.qname('', 'onEvent')
+        pstr = lambda v: bytes([PUSHSTRING]) + u30(abc.string(v))
+        prop = lambda op, name: bytes([op]) + u30(abc.qname('', name))
+        ctor += bytes([GETLOCAL0]) + prop(GETPROPERTY, 'stage')
+        ctor += bytes([DUP]) + pstr('noScale') + prop(SETPROPERTY, 'scaleMode')
+        ctor += bytes([DUP]) + pstr('TL') + prop(SETPROPERTY, 'align')
+        for event in INPUT_EVENTS:
+            ctor += bytes([DUP]) + pstr(event) + bytes([GETLOCAL0]) + prop(GETPROPERTY, 'onEvent')
+            ctor += bytes([CALLPROPVOID]) + u30(abc.qname('', 'addEventListener')) + u30(2)
+        ctor += bytes([POP])
+
+        # method 3: onEvent(e)
+        handler = bytearray([GETLOCAL0, PUSHSCOPE, GETLEX]) + u30(abc.qname('flash.external', 'ExternalInterface'))
+        handler += pstr('report') + pstr('flash ')
+        for name, sep in [('type', ' '), ('stageX', ','), ('stageY', ' '), ('delta', None)]:
+            handler += bytes([GETLOCAL1]) + prop(GETPROPERTY, name) + bytes([ADD])
+            if sep:
+                handler += pstr(sep) + bytes([ADD])
+        handler += bytes([CALLPROPVOID]) + u30(abc.qname('', 'call')) + u30(2) + bytes([RETURNVOID])
     ctor += bytes([RETURNVOID])
 
     # method 1: class init, method 2: script init
@@ -134,24 +170,32 @@ def build_abc():
     out = bytearray(struct.pack('<HH', 16, 46))  # minor, major
     out += abc.pool()
 
-    out += u30(3)  # methods: param_count, return_type, name, flags
+    out += u30(4 if report_input else 3)  # methods: param_count, return_type, [param types], name, flags
     for _ in range(3):
         out += u30(0) + u30(0) + u30(0) + bytes([0])
+    if report_input:
+        out += u30(1) + u30(0) + u30(0) + u30(0) + bytes([0])  # onEvent(e:*):*
     out += u30(0)  # metadata
 
     out += u30(1)  # classes
     # instance_info: name, super, flags (sealed), interfaces, iinit, traits
-    out += u30(main) + u30(sprite) + bytes([0x01]) + u30(0) + u30(0) + u30(0)
+    out += u30(main) + u30(sprite) + bytes([0x01]) + u30(0) + u30(0)
+    if report_input:
+        out += u30(1) + u30(on_event) + bytes([0x01]) + u30(0) + u30(3)  # method trait: disp_id, method
+    else:
+        out += u30(0)
     out += u30(1) + u30(0)  # class_info: cinit, traits
 
     out += u30(1)  # scripts: init, 1 class trait (slot 1 -> class 0)
     out += u30(2) + u30(1) + u30(main) + bytes([0x04]) + u30(1) + u30(0)
 
     bodies = [
-        (0, 3, 2, 8, 9, bytes(ctor)),
+        (0, 4 if report_input else 3, 2, 8, 9, bytes(ctor)),
         (1, 1, 1, 7, 8, cinit),
         (2, 3, 1, 1, 8, bytes(sinit)),
     ]
+    if report_input:
+        bodies.append((3, 6, 2, 8, 9, bytes(handler)))
     out += u30(len(bodies))
     for method, max_stack, locals_, init_scope, max_scope, code in bodies:
         out += u30(method) + u30(max_stack) + u30(locals_) + u30(init_scope) + u30(max_scope)
@@ -165,12 +209,12 @@ def tag(code, data):
     return struct.pack('<HI', (code << 6) | 0x3F, len(data)) + data
 
 
-def build_swf():
+def build_swf(report_input=False):
     rect = bytes([0x78, 0x00, 0x05, 0x5F, 0x00, 0x00, 0x0F, 0xA0, 0x00])  # 0,0 - 550x400 twips
     body = rect + struct.pack('<HH', 24 << 8, 1)
     body += tag(69, struct.pack('<I', 0x08))                            # FileAttributes: AS3
     body += tag(9, bytes([0x20, 0x20, 0x30]))                           # SetBackgroundColor
-    body += tag(82, struct.pack('<I', 1) + b'main\x00' + build_abc())   # DoABC (lazy init)
+    body += tag(82, struct.pack('<I', 1) + b'main\x00' + build_abc(report_input))   # DoABC (lazy init)
     body += tag(76, struct.pack('<HH', 1, 0) + b'Main\x00')             # SymbolClass: root = Main
     body += tag(1, b'')                                                 # ShowFrame
     body += tag(0, b'')                                                 # End
@@ -178,7 +222,8 @@ def build_swf():
 
 
 if __name__ == '__main__':
-    data = build_swf()
-    with open(sys.argv[1] if len(sys.argv) > 1 else 'test.swf', 'wb') as f:
+    args = [a for a in sys.argv[1:] if a != '--report-input']
+    data = build_swf('--report-input' in sys.argv)
+    with open(args[0] if args else 'test.swf', 'wb') as f:
         f.write(data)
     print(f'wrote {len(data)} bytes')

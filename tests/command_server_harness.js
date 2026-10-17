@@ -21,6 +21,15 @@ createCommandServer(ipcPath, (obj) => {
             return new Promise((resolve) => setTimeout(() => resolve(true), obj.ms))
         case 'asyncfail':
             return Promise.reject(new Error('failed'))
+        case 'value':
+            // like "getScale": answered with "<id>|ok|<value>"
+            return 1.25
+        case 'asyncvalue':
+            return new Promise((resolve) => setTimeout(() => resolve('done'), 10))
+        case 'multiline':
+            return 'a\nb\r\nc'
+        case 'object':
+            return {}
         case 'count':
             process.stdout.write('executed=' + executed + '\n')
             return true

@@ -47,7 +47,9 @@ public:
 
     bool IsValid();
 
-    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {}, int ack_timeout_ms = 0);
+    // |reply| receives the value of a "<id>|ok|<value>" answer (empty for a plain "<id>|ok")
+    bool SendBrowserCommand(const std::string &cmd, std::initializer_list<JsonParam> params = {}, int ack_timeout_ms = 0,
+                            std::string *reply = nullptr);
     void ToggleBrowserVisibility(bool visible);
 
     // returns true if the command was successfully processed by flash
@@ -78,6 +80,7 @@ public:
 
     // testing helper - show a red dot at the virtual cursor position
     void EnableCursorMarker(bool enable);
+    // x/y in window pixels
     void UpdateCursorMarker(int32_t x, int32_t y);
 
     // utility templates that are used by JNI wrapper; keep public so the JNI code can call them
@@ -136,6 +139,10 @@ private:
     bool m_force_extract_and_run = false;
     uint64_t m_last_flash_scan_ms = 0;
 
+    // browser window pixels per game coordinate (HiDPI), see browser_scale()
+    std::atomic<double> m_browser_scale { 1.0 };
+    std::atomic<uint64_t> m_browser_scale_ms { 0 }; // last query, 0 = query again
+
     // browser lifecycle + browser socket (recursive: restart paths call each other)
     std::recursive_mutex m_browser_mutex;
 
@@ -160,6 +167,7 @@ private:
 
     // helpers for browser IPC
     bool ensure_browser_ipc_connected();
+    double browser_scale();
 };
 
 

@@ -1,10 +1,18 @@
 // Command server for the native client (DarkTanos.so).
 // Messages are newline delimited JSON ({"id":N,"cmd":...}); every message is answered
-// with "N|ok" or "N|err" so the client never waits for a timeout on failures. A handler may
-// return a Promise; the answer is then sent once it settles.
+// with "N|ok", "N|ok|<value>" or "N|err" so the client never waits for a timeout on failures.
+// A handler returns true (ok), a number or string (ok with that value) or anything else (err),
+// or a Promise of one; the answer is then sent once it settles.
 // Kept free of Electron APIs so it can be tested with plain Node.
 const net = require('net')
 const fs = require('fs')
+
+function replyFor(result) {
+    if (result === true) return "|ok";
+    // a newline in the value would break the line framing
+    if (typeof result === 'number' || typeof result === 'string') return "|ok|" + String(result).replace(/[\r\n]/g, ' ');
+    return "|err";
+}
 
 function createCommandServer(ipcPath, handleCommand, log) {
     const server = net.createServer(function (sock) {
@@ -30,7 +38,7 @@ function createCommandServer(ipcPath, handleCommand, log) {
                 }
 
                 // Send acknowledgment back to the sender (after completion for async commands).
-                const ack = (ok) => { if (!sock.destroyed) sock.write(id + (ok === true ? "|ok\n" : "|err\n")); };
+                const ack = (res) => { if (!sock.destroyed) sock.write(id + replyFor(res) + "\n"); };
                 if (result instanceof Promise) {
                     result.then(ack, (e) => { log("Command failed:", line, e); ack(false); });
                 } else {
