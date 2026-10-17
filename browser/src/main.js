@@ -1,4 +1,4 @@
-const {app, BrowserWindow} = require('electron')
+const {app, BrowserWindow, screen} = require('electron')
 const path = require('path')
 const fs = require('fs')
 const {initSplashScreen} = require("@trodi/electron-splashscreen")
@@ -22,7 +22,7 @@ const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./ke
 const { createCommandServer } = require('./command_server');
 
 /**
- * Executes one command, returns true on success.
+ * Executes one command, returns true on success or the command's result value.
  */
 function handleCommand(obj) {
     if (!mainWindow || mainWindow.isDestroyed()) {
@@ -53,6 +53,12 @@ function handleCommand(obj) {
             // with "wait" the answer comes after the last character was typed (text paste)
             const typing = handleText(mainWindow.webContents, obj.text);
             return obj.wait ? typing.then(() => true) : true;
+        }
+        case "getScale": {
+            // window pixels per DIP (the bot's coordinates): the native client sends mouse input
+            // as X11 events in window pixels. Page zoom (Ctrl +/-) changes the mapping too.
+            const display = screen.getDisplayMatching(mainWindow.getBounds());
+            return display.scaleFactor * mainWindow.webContents.getZoomFactor();
         }
         default:
             log("Unknown command:", obj.cmd);

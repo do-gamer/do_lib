@@ -88,6 +88,92 @@ public class TanosIT {
         return after ? v | (1L << 63) : v;
     }
 
+    // with a wParam: 1 for mouse actions (like DarkBot), the delta for NativeAction.MouseWheel
+    static long action(int message, int wParam, int x, int y) {
+        return action(message, x, y, false) | ((long) (wParam & 0xffff) << 32);
+    }
+
+    static List<String> readEvents(Path events) {
+        try {
+            return Files.exists(events) ? Files.readAllLines(events) : new ArrayList<>();
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
+    }
+
+    /** Runs one input action and returns the events the page and the player reported for it. */
+    static List<String> input(Path events, Runnable action) throws Exception {
+        Files.deleteIfExists(events);
+        action.run();
+        Thread.sleep(700);
+        return readEvents(events);
+    }
+
+    static void expectEvent(List<String> got, String regex, String what) {
+        boolean ok = got.stream().anyMatch(l -> l.matches(regex));
+        check(ok, what + ": " + regex + (ok ? "" : "  got " + got));
+    }
+
+    /**
+     * Every mouse action, direct (DarkBot's Tanos adapter) and through postActions
+     * (NativeAction), arrives where it was sent, as seen by the page and by the flash player.
+     * Positions are game coordinates (CSS px): with XFT_DPI=192 the browser renders at scale 2
+     * and the client has to convert them to window pixels.
+     */
+    static void mouseTest(String url, Path events) throws Exception {
+        tanos.setData(url, "dosid=integrationtest", "", "");
+        new Thread(tanos::createWindow).start();
+        long valid = waitValid(90_000);
+        result("launch_to_valid_ms", valid);
+        long loaded = waitFor(() -> readEvents(events).stream().anyMatch(l -> l.startsWith("loaded")), 30_000);
+        readEvents(events).stream().filter(l -> l.startsWith("loaded")).forEach(l -> result("page", l.substring(7).replace(' ', '_')));
+        check(valid >= 0 && loaded >= 0, "browser launched and test page loaded");
+        if (valid < 0 || loaded < 0) return;
+        String dpi = System.getenv("XFT_DPI");
+        if (dpi != null && !dpi.isEmpty()) {
+            double scale = Integer.parseInt(dpi) / 96.0;
+            String dpr = "dpr=" + (scale == Math.rint(scale) ? String.valueOf((int) scale) : String.valueOf(scale));
+            check(readEvents(events).stream().anyMatch(l -> l.startsWith("loaded") && l.endsWith(dpr)),
+                    "page renders at " + dpr + " (Xft.dpi " + dpi + ")");
+        }
+        Thread.sleep(3000); // the player runs its constructor (adds the listeners)
+
+        // page, direct calls
+        expectEvent(input(events, () -> tanos.mouseMove(100, 60)), "mousemove pad 100,60", "mouseMove");
+        expectEvent(input(events, () -> tanos.mouseDown(110, 70)), "mousedown pad 110,70", "mouseDown");
+        expectEvent(input(events, () -> tanos.mouseUp(110, 70)), "mouseup pad 110,70", "mouseUp");
+        List<String> got = input(events, () -> tanos.mouseClick(120, 80));
+        expectEvent(got, "mousedown pad 120,80", "mouseClick down");
+        expectEvent(got, "mouseup pad 120,80", "mouseClick up");
+        expectEvent(got, "click pad 120,80", "mouseClick click");
+
+        // page, postActions
+        expectEvent(input(events, () -> tanos.postActions(action(0x200, 1, 130, 90))), "mousemove pad 130,90", "action MOVE");
+        got = input(events, () -> tanos.postActions(action(0x201, 1, 140, 100), action(0x202, 1, 140, 100)));
+        expectEvent(got, "mousedown pad 140,100", "action DOWN");
+        expectEvent(got, "mouseup pad 140,100", "action UP");
+        expectEvent(input(events, () -> tanos.postActions(action(0x1FF, 1, 150, 110))), "click pad 150,110", "action CLICK");
+        expectEvent(input(events, () -> tanos.postActions(action(0x20A, -120, 160, 120))), "wheel pad 160,120 1", "action WHEEL down");
+        expectEvent(input(events, () -> tanos.postActions(action(0x20A, 120, 170, 130))), "wheel pad 170,130 -1", "action WHEEL up");
+
+        // flash player at 360,20
+        expectEvent(input(events, () -> tanos.mouseMove(410, 70)), "flash mouseMove 50,50 0", "flash mouseMove");
+        got = input(events, () -> tanos.mouseClick(460, 120));
+        expectEvent(got, "flash mouseDown 100,100 0", "flash mouseClick down");
+        expectEvent(got, "flash mouseUp 100,100 0", "flash mouseClick up");
+        expectEvent(got, "flash click 100,100 0", "flash mouseClick click");
+        got = input(events, () -> tanos.postActions(action(0x201, 1, 480, 140), action(0x202, 1, 480, 140)));
+        expectEvent(got, "flash mouseDown 120,120 0", "flash action DOWN");
+        expectEvent(got, "flash mouseUp 120,120 0", "flash action UP");
+        // the bot scrolls lists without moving the mouse there first (SettingsGui, dispatch
+        // plugins); the player scrolls whatever is under its own mouse position
+        got = input(events, () -> tanos.postActions(action(0x20A, -120, 560, 220)));
+        expectEvent(got, "wheel swf 560,220 1", "flash action WHEEL down reaches the player");
+        expectEvent(got, "flash mouseWheel 200,200 -\\d+", "flash action WHEEL down at its position");
+        got = input(events, () -> tanos.postActions(action(0x20A, 120, 600, 260)));
+        expectEvent(got, "flash mouseWheel 240,240 \\d+", "flash action WHEEL up at its position");
+    }
+
     /**
      * GroupManager.sendInvite: focus the field (2 clicks), paste the name, click the button.
      * Repeated with a different name each time; with -Dtanos.awt=true a Swing window has the
@@ -252,6 +338,11 @@ public class TanosIT {
 
         if (args.length > 3 && args[2].equals("--paste-test")) {
             pasteTest(url, Paths.get(args[3]));
+            finish();
+        }
+
+        if (args.length > 3 && args[2].equals("--mouse-test")) {
+            mouseTest(url, Paths.get(args[3]));
             finish();
         }
 
