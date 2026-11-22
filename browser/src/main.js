@@ -18,6 +18,12 @@ app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
+// Don't sync GPU buffer swaps to vblank. While the display is powered off (screen blanked or
+// locked, DPMS) Xorg fakes vblank at 1 Hz, so every vsynced swap blocks the GPU process for ~1 s;
+// flash waits on it and the game thread only ticks every 1-3 s (ping climbs, IPC calls time out)
+// until the screen wakes. Frames stay paced at the display rate by Chromium's own begin-frame timer.
+app.commandLine.appendSwitch('disable-gpu-vsync')
+
 const { handleKeyClick, handleKeyDown, handleKeyUp, handleText } = require('./key_handler');
 const { createCommandServer } = require('./command_server');
 

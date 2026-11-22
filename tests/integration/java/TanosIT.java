@@ -374,6 +374,33 @@ public class TanosIT {
             finish();
         }
 
+        if (args.length > 4 && args[2].equals("--hold")) {
+            // display test (tests/display/run.sh): keep the client running like the bot's main
+            // loop does (isValid every 100 ms) until the stop file appears; validity changes are
+            // logged with their time so they can be matched to the test phases
+            Path stop = Paths.get(args[3]);
+            long end = System.currentTimeMillis() + Long.parseLong(args[4]) * 1000;
+            tanos.setData(url, "dosid=integrationtest", "", "");
+            new Thread(tanos::createWindow).start();
+            long valid = waitValid(90_000);
+            result("launch_to_valid_ms", valid);
+            check(valid >= 0, "browser launched and flash process found");
+            int invalid = 0, checks = 0;
+            boolean wasValid = true;
+            while (valid >= 0 && System.currentTimeMillis() < end && !Files.exists(stop)) {
+                boolean ok = tanos.isValid();
+                checks++;
+                if (!ok) invalid++;
+                if (ok != wasValid) {
+                    System.out.println("EVENT " + (ok ? "valid" : "invalid") + " " + System.currentTimeMillis());
+                    wasValid = ok;
+                }
+                Thread.sleep(100);
+            }
+            result("hold_invalid_checks", invalid + "/" + checks);
+            finish();
+        }
+
         if (args.length > 2 && args[2].equals("--launch-and-wait")) {
             // used to test cleanup when the bot is killed (-9)
             tanos.setData(url, "dosid=integrationtest", "", "");
