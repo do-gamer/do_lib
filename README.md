@@ -109,6 +109,48 @@ The native tests use the production IPC server (`do_lib/ipc.cpp`) and client
 (`client/flash_ipc_client.cpp`) against a simulated game thread, and the production
 browser command server (`browser/src/command_server.js`) in Node.
 
+### Display power test (screen off / locked)
+
+An unattended bot runs with the session locked and the display powered off. The game must
+keep its speed then: with GPU vsync, Xorg paces every frame at 1 Hz while no display is on
+(the game thread ticked every 1-3 s, ping climbed and IPC calls timed out until the screen
+woke up). The browser therefore runs with `--disable-gpu-vsync`. This test guards it; it
+must run on the real desktop (X11 with DPMS: Xvfb has no display power states):
+
+```bash
+tests/display/run.sh                # test SWF via the real bot path: JVM + DarkTanos.so + AppImage + do_lib
+tests/display/run.sh ../bot/lib     # the same with the libs from another directory
+tests/display/run.sh --game         # the game of the bot running right now (logged in), nothing is launched
+```
+
+Phases: visible, display off, lock screen, lock screen + display off (the overnight state),
+display on. The screen goes dark during the test; don't touch mouse or keyboard (that
+wakes the display, those seconds don't count; Ctrl+C restores the display). Each phase must
+keep >= 80% of the visible frame rate with no gap over 250 ms (500 ms with `--game`). The
+test SWF renders through Stage3D in `wmode=direct` like the game and reports every frame
+of the player's main thread; `--game` reads do_lib's game-thread heartbeat from its shared
+memory (read-only). Expected result with vsync (the bug) vs. the fix:
+
+```
+phase           display  frames/s  worst gap        phase           display  frames/s  worst gap
+display_off     off             1    1998 ms        display_off     off            60      18 ms
+lock_screen+off off             1    1999 ms        lock_screen+off off            60      18 ms
+```
+
+| Variable | Effect |
+|---|---|
+| `PHASE_SECONDS=20` / `OFF_SECONDS=20` | phase lengths; e.g. `OFF_SECONDS=1800` for a 30 minute soak with the display off |
+| `REAL_LOCK=1` | lock with the real screen locker (`LOCK_CMD=...` to override) instead of a covering window; unlock yourself at the end |
+| `GAP_LIMIT_MS=...` | longest allowed gap between two game-thread frames |
+| `KEEP_WORK=1` | keep the logs also when the test passes |
+
+The test also warns when closing the lid or idling suspends the laptop: a suspended laptop
+stops the bot completely, no browser setting can help there (set the lid action to blank /
+do nothing).
+
+Without vsync, frames are paced by Chromium alone: with the window visible the player gets
+~59 instead of 60 frames/s (one ~35 ms frame per second); CPU use is unchanged.
+
 ## Portability
 
 - Libraries built with `-d` need glibc 2.18+ and link libstdc++/libgcc statically; the only

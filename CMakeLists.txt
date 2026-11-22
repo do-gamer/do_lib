@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 project (DarkTanos)
 
-set(API_VERSION 12)
+set(API_VERSION 13)
 
 set(CMAKE_CXX_STANDARD 17)
 # Default to an optimized build; previously this unconditionally forced Debug (-O0),

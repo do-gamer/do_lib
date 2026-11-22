@@ -41,6 +41,34 @@ window.addEventListener('load', () => report('loaded ' + window.innerWidth + 'x'
 </script></body></html>"""
 
 
+# Display test page (DISPLAY_TEST=1, tests/display/run.sh): the player (test.swf built with
+# --stage3d) renders through Stage3D in wmode=direct like the game and calls tick() once per
+# frame of its main thread. Once a second the page reports how many frames ran and the longest
+# gap between two of them (a stall still going on counts up to now).
+DISPLAY_PAGE = b"""<!doctype html><html><body style="margin:0;background:#202030">
+<embed id="swf" src="/test.swf" type="application/x-shockwave-flash" width="320" height="240"
+       wmode="direct" allowscriptaccess="always">
+<script>
+function report(what) { fetch('/event?' + encodeURIComponent(what)); }
+let frames = 0, last = 0, maxGap = 0, rafs = 0, lastReport = performance.now();
+function tick(flashTime) {
+    const now = performance.now();
+    if (last) maxGap = Math.max(maxGap, now - last);
+    last = now;
+    frames++;
+}
+(function raf() { rafs++; requestAnimationFrame(raf); })();
+setInterval(() => {
+    const now = performance.now();
+    const gap = Math.round(Math.max(maxGap, last ? now - last : 0));
+    report('second at=' + Date.now() + ' frames=' + frames + ' max_gap_ms=' + gap + ' raf=' + rafs
+           + ' interval_ms=' + Math.round(now - lastReport));
+    frames = 0; maxGap = 0; rafs = 0; lastReport = now;
+}, 1000);
+window.addEventListener('load', () => report('loaded ' + window.innerWidth + 'x' + window.innerHeight));
+</script></body></html>"""
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith('/event?'):
@@ -52,6 +80,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body, ctype = CLICK_PAGE, 'text/html'
         elif os.environ.get('MOUSE_TEST') and not self.path.startswith('/test.swf'):
             body, ctype = MOUSE_PAGE, 'text/html'
+        elif os.environ.get('DISPLAY_TEST') and not self.path.startswith('/test.swf'):
+            body, ctype = DISPLAY_PAGE, 'text/html'
         elif self.path.startswith('/test.swf'):
             with open(os.path.join(ROOT, 'test.swf'), 'rb') as f:
                 body, ctype = f.read(), 'application/x-shockwave-flash'
