@@ -1,4 +1,5 @@
 #include "darkorbit.h"
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <iostream>
@@ -252,9 +253,328 @@ bool Darkorbit::post_async(std::function<uintptr_t()> f)
     }).valid();
 }
 
+static inline bool is_object_atom(Atom a) { return (a & 7) == 1 && (a & ~Atom(7)) != 0; }
+static constexpr Atom NULL_ATOM = 1;  // kObjectType without a pointer
+
+static inline avm::ScriptObject *as_object(Atom a)
+{
+    return is_object_atom(a) ? reinterpret_cast<avm::ScriptObject *>(avm::remove_kind(a)) : nullptr;
+}
+
+// Multiname of a var or const declared by these traits or a base class' (first match from the
+// most derived class), from the declaring class' own pool: exact, private namespaces included
+static avm::Multiname *declared_slot(avm::Traits *traits, const std::string &name)
+{
+    for (int depth = 0; traits && depth < 32; traits = traits->base, depth++)
+    {
+        if (!traits->pool)
+            continue;
+        for (auto &trait : traits->parse_traits().traits)
+        {
+            if ((trait.kind == avm::TRAIT_Slot || trait.kind == avm::TRAIT_Const) && trait.name == name)
+                return traits->pool->get_multiname(trait.name_index);
+        }
+    }
+    return nullptr;
+}
+
+// vtable index of the method declared with exactly this name (0: none). Calling methods instead
+// of reading properties: a wrong name can't make the VM throw through our frames.
+static uint32_t method_index(avm::ScriptObject *obj, const std::string &name)
+{
+    auto methods = obj->vtable->get_methods();
+    for (uint32_t i = 0; i < methods.size(); i++)
+    {
+        if (methods[i] && methods[i]->method_info && methods[i]->method_info->name() == name)
+            return i;
+    }
+    return 0;
+}
+
+// QName (flag 0x02 only: no ATTR, RTNS, RTNAME, NSSET) in the public namespace of a package
+static avm::Multiname *public_qname(avm::PoolObject *pool, const std::string &uri, const std::string &name)
+{
+    for (uintptr_t i = 0; i < pool->precomp_mn_size; i++)
+    {
+        avm::Multiname *mn = pool->get_multiname(i);
+        if (mn && (mn->flags & 0x1f) == 0x02 && mn->ns && mn->ns->type() == avm::Namespace::NS_Public
+            && mn->get_name() == name && mn->ns->get_uri() == uri)
+            return mn;
+    }
+    return nullptr;
+}
+
+// Class object of a public game class by its name: the public QName with that name in a package
+// (game classes all live in one). It must be in one package only: finddef/getproperty of a name
+// that isn't a definition throw through our frames. nullptr with the reason in *why.
+static avm::ScriptObject *find_class(avm::PoolObject *pool, avm::ScriptObject *main, const std::string &name,
+                                     const char **why)
+{
+    auto fail = [why](const char *reason) -> avm::ScriptObject *
+    {
+        *why = reason;
+        return nullptr;
+    };
+    avm::Multiname *class_mn = nullptr;
+    for (uintptr_t i = 0; i < pool->precomp_mn_size; i++)
+    {
+        avm::Multiname *mn = pool->get_multiname(i);
+        if (!mn || (mn->flags & 0x1f) != 0x02 || !mn->ns || mn->ns->type() != avm::Namespace::NS_Public
+            || mn->get_name() != name || mn->ns->get_uri().empty())
+            continue;
+        if (class_mn && class_mn->ns->get_uri() != mn->ns->get_uri())
+            return fail("class name in more than one package");
+        class_mn = mn;
+    }
+    if (!class_mn)
+        return fail("class not in the game's constant pool");
+    avm::ScriptObject *script = flash_stuff::finddef(main->vtable->einit, class_mn);
+    if (!script)
+        return fail("class not defined");
+    Atom class_atom = flash_stuff::get_property(script, class_mn);
+    if (!is_object_atom(class_atom))
+        return fail("class object not found");
+    auto *cls = reinterpret_cast<avm::ScriptObject *>(avm::remove_kind(class_atom));
+    if (cls->vtable->traits->name() != name + "$")   // class objects' traits: "Name$"
+        return fail("unexpected class object");
+    return cls;
+}
+
+bool Darkorbit::resolve_tooltip_control()
+{
+    auto &f = m_tooltips;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[tooltip] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "TooltipControl", &why);
+    if (!cls)
+        return disable(why);
+
+    // the game's own TooltipControl.getInstance() (static: the class object is 'this')
+    uint32_t get_instance = method_index(cls, "getInstance");
+    if (!get_instance)
+        return disable("TooltipControl.getInstance not found");
+    auto *control = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(cls->call(get_instance)));
+    if (!control || control->vtable->traits->name() != "TooltipControl")
+        return disable("unexpected TooltipControl instance");
+
+    avm::Multiname *list_mn = declared_slot(control->vtable->traits, "toolTipsList");
+    if (!list_mn)
+        return disable("TooltipControl.toolTipsList not found");
+    uint32_t remove_index = method_index(control, "removeToolTip");
+    if (!remove_index)
+        return disable("TooltipControl.removeToolTip not found");
+
+    // DisplayObject.stage, read only on hook targets (InteractiveObjects, never anything else)
+    avm::Multiname *stage_mn = public_qname(m_const_pool, "", "stage");
+    if (!stage_mn)
+        return disable("public 'stage' name not found");
+
+    f.control = control;
+    f.list_mn = list_mn;
+    f.stage_mn = stage_mn;
+    f.remove_index = remove_index;
+    utils::log("[tooltip] cleaner ready (getInstance {}, removeToolTip {})\n", get_instance, remove_index);
+    return true;
+}
+
+void Darkorbit::prune_tooltips()
+{
+    auto &f = m_tooltips;
+    if (f.disabled || !m_main)
+        return;
+
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_run < 15000)
+        return;
+    f.last_run = now;
+
+    if (!f.control && !resolve_tooltip_control())
+        return;
+
+    Atom list_atom = flash_stuff::get_property(f.control, f.list_mn);
+    if (!is_object_atom(list_atom))
+        return;
+    auto *list = reinterpret_cast<avm::Array *>(avm::remove_kind(list_atom));
+    if (list->vtable->traits->name() != "Array" || !list->data
+        || avm::get_block_header(list->data)->gc != m_gc)  // the storage must be a block of our GC
+    {
+        utils::log("[tooltip] cleaner disabled: toolTipsList isn't an Array\n");
+        f.disabled = true;
+        return;
+    }
+    // dense storage: ListData { vtable, uint32 len, ..., Atom entries[] }
+    const uint32_t dense_len = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(list->data) + 8);
+    const uint32_t count = std::min(list->size, dense_len);
+
+    // collect first: removeToolTip splices the list. The targets stay referenced by the list
+    // until their own removal, so the GC can't free them meanwhile.
+    std::vector<avm::ScriptObject *> stale;
+    for (uint32_t i = 0; i < count && stale.size() < 150; i++)
+    {
+        Atom hook_atom = (*list)[i];
+        if (!is_object_atom(hook_atom))
+            continue;
+        auto *hook = reinterpret_cast<avm::ScriptObject *>(avm::remove_kind(hook_atom));
+        if (hook->vtable->traits->name() != "ToolTipHook")
+            continue; // e.g. a subclass: leave it alone
+        if (!f.get_target_index && !(f.get_target_index = method_index(hook, "getTargetObject")))
+        {
+            utils::log("[tooltip] cleaner disabled: ToolTipHook.getTargetObject not found\n");
+            f.disabled = true;
+            return;
+        }
+        auto *target = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(hook->call(f.get_target_index)));
+        if (!target)
+            continue;
+        Atom stage = flash_stuff::get_property(target, f.stage_mn);
+        if (stage == NULL_ATOM)
+        {
+            stale.push_back(target);
+        }
+        else if (!is_object_atom(stage) ||
+                 reinterpret_cast<avm::ScriptObject *>(avm::remove_kind(stage))->vtable->traits->name() != "Stage")
+        {
+            utils::log("[tooltip] cleaner disabled: 'stage' didn't read a Stage\n");
+            f.disabled = true;
+            return;
+        }
+    }
+
+    for (auto *target : stale)
+        f.control->call(f.remove_index, target);   // TooltipControl.removeToolTip(target)
+
+    if (!stale.empty())
+    {
+        f.removed_total += stale.size();
+        utils::log("[tooltip] removed {} tooltips of objects off the stage ({} hooks before, {} total), GC heap {} MB\n",
+                   stale.size(), count, f.removed_total, flash_stuff::gc_heap_used_mb());
+    }
+}
+
+// Value of a slot obj's class (or a base class) declares, 0 if it declares none: getproperty of
+// a name the object doesn't have would throw through our frames
+Atom Darkorbit::read_slot(avm::ScriptObject *obj, const char *name)
+{
+    auto key = std::make_pair(obj->vtable->traits, std::string(name));
+    auto it = m_ships.slots.find(key);
+    if (it == m_ships.slots.end())
+        it = m_ships.slots.emplace(key, declared_slot(key.first, key.second)).first;
+    return it->second ? flash_stuff::get_property(obj, it->second) : 0;
+}
+
+bool Darkorbit::resolve_ship_fix()
+{
+    auto &f = m_ships;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[ships] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    if (!m_screen_manager || avm::get_block_header(m_screen_manager)->gc != m_gc
+        || m_screen_manager->get_name() != "ScreenManager")
+        return disable("unexpected ScreenManager");
+
+    f.screen = m_screen_manager;
+    utils::log("[ships] cleaner ready\n");
+    return true;
+}
+
+void Darkorbit::prune_ship_listeners()
+{
+    auto &f = m_ships;
+    if (f.disabled || !m_main)
+        return;
+
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_run < 15000)
+        return;
+    f.last_run = now;
+
+    if (!f.screen && !resolve_ship_fix())
+        return;
+
+    // ScreenManager._map._lockManager.targetChanged.slots: the listener list (osflash SlotList)
+    avm::ScriptObject *map = as_object(read_slot(f.screen, "_map"));
+    if (!map || map->get_name() != "Map")
+        return;
+    avm::ScriptObject *lock = as_object(read_slot(map, "_lockManager"));
+    if (!lock || lock->get_name() != "LockManager")
+        return;
+    avm::ScriptObject *signal = as_object(read_slot(lock, "targetChanged"));
+    if (!signal || signal->get_name() != "Signal")
+        return;
+
+    // collect first, remove after: Slot.remove() replaces the list. Until its own removal each
+    // collected Slot stays in the signal's list, so the GC can't free it meanwhile.
+    std::vector<avm::ScriptObject *> stale;
+    uint32_t count = 0;
+    for (avm::ScriptObject *node = as_object(read_slot(signal, "slots")); node && count < 20000; count++)
+    {
+        if (node->get_name() != "SlotList" || read_slot(node, "nonEmpty") != avm::TRUE)
+            break; // SlotList.NIL ends the list
+        avm::ScriptObject *slot = as_object(read_slot(node, "head"));
+        node = as_object(read_slot(node, "tail"));
+        if (!slot || slot->get_name() != "Slot" || stale.size() >= 100)
+            continue;
+        avm::ScriptObject *closure = as_object(read_slot(slot, "_listener"));
+        if (!closure || closure->get_name() != "MethodClosure")
+            continue;
+        // a bound method: its receiver, and the MethodEnv it calls
+        const auto c = reinterpret_cast<uintptr_t>(closure);
+        avm::ScriptObject *display = as_object(*reinterpret_cast<Atom *>(c + offsets::closure_saved_this));
+        if (!display || display->get_name() != "ShipUpgradeDisplay")
+            continue; // another listener (lock displays, HealthInfoDisplay, ...)
+        if (!f.handler_index && !(f.handler_index = method_index(display, "handleLockChanged")))
+        {
+            utils::log("[ships] cleaner disabled: ShipUpgradeDisplay.handleLockChanged not found\n");
+            f.disabled = true;
+            return;
+        }
+        if (*reinterpret_cast<avm::MethodEnv **>(c + offsets::closure_call_env) != display->vtable->methods[f.handler_index])
+            continue; // another method of the display
+        avm::ScriptObject *trait = as_object(read_slot(display, "_trait"));
+        avm::ScriptObject *owner = trait ? as_object(read_slot(trait, "_owner")) : nullptr;
+        // MapEntity.deactivateEntity() (removed from the map) nulls _container
+        if (owner && read_slot(owner, "_container") == NULL_ATOM)
+            stale.push_back(slot);
+    }
+    if (stale.empty())
+        return;
+
+    if (!f.remove_index && !(f.remove_index = method_index(stale.front(), "remove")))
+    {
+        utils::log("[ships] cleaner disabled: Slot.remove not found\n");
+        f.disabled = true;
+        return;
+    }
+    for (avm::ScriptObject *slot : stale)
+        slot->call(f.remove_index);   // Slot.remove(): targetChanged.remove(listener)
+
+    f.removed_total += stale.size();
+    utils::log("[ships] released {} dead ships (lock listeners: {} before, {} removed in total), GC heap {} MB\n",
+               stale.size(), count, f.removed_total, flash_stuff::gc_heap_used_mb());
+}
+
 void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
 {
     m_ipc.Heartbeat();
+
+    // the game's own leaks, on the game thread. They call into the VM: a collection may free
+    // hooked code meanwhile (free_chunk -> uninstall)
+    prune_tooltips();
+    if (!m_installed)
+        return;
+    prune_ship_listeners();
+    if (!m_installed)
+        return;
 
     // Run the tasks outside the lock: they call into the VM, which may re-enter us
     // (GC -> free_chunk -> uninstall) and the ipc thread must be able to queue meanwhile.
@@ -487,6 +807,9 @@ bool Darkorbit::install(uintptr_t main_app_address)
     mouse_click(0, 0, 1); // Mouse click to initialize the click param for flash IPC
 
     m_main            = memory::read<avm::ScriptObject *>(main_app_address + 0x540);
+    m_gc              = avm::get_block_header(m_main)->gc;
+    m_tooltips        = TooltipFix{}; // a new game: resolve the TooltipControl again
+    m_ships           = ShipFix{};
     m_screen_manager  = m_main->get_at<avm::ScriptObject *>(0x1f8);
     m_gui_manager     = m_main->get_at<avm::ScriptObject *>(0x200);
     m_event_manager   = m_screen_manager->get_at<avm::ScriptObject *>(0xc8);

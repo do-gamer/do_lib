@@ -168,6 +168,13 @@ Logs are written to `logs/<start time>_TanosApi.log` (bot client, browser and fl
 process share one file). Set `TANOS_DEBUG=1` in the bot's environment to also log flash
 hook activity (JIT verifications, GC chunk frees).
 
+do_lib works around two memory leaks of the game client: tooltips of discarded action bar
+elements and dead ships kept alive by their HUD's lock listener. Both cleaners run on the
+game thread every 15 s and log `[tooltip] cleaner ready` / `[ships] cleaner ready` at
+start, then what they removed (`[tooltip] removed ...`, `[ships] released ...`). If a
+game update changes the classes they rely on, they log `cleaner disabled: <reason>` and
+stay off.
+
 Leftover shared memory segments from older versions (killed flash processes) can be
 listed with `ipcs -m` (1024 byte segments with `nattch 0`) and removed with `ipcrm -m <id>`.
 

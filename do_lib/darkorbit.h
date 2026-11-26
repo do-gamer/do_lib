@@ -8,6 +8,8 @@
 #include <future>
 #include <mutex>
 #include <functional>
+#include <map>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -206,6 +208,44 @@ private:
 
     void handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv) ;
 
+    // The game never unregisters the tooltips of action bar elements it throws away, the
+    // TooltipControl singleton keeps them (and their whole display tree) forever. Remove the
+    // tooltips of objects that left the stage with the game's own removeToolTip (game thread).
+    void prune_tooltips();
+    bool resolve_tooltip_control();
+
+    struct TooltipFix
+    {
+        bool disabled = false;
+        avm::ScriptObject *control = nullptr;     // TooltipControl._instance (lives in a static)
+        avm::Multiname *list_mn = nullptr;        // TooltipControl.toolTipsList
+        uint32_t get_target_index = 0;            // vtable index of ToolTipHook.getTargetObject
+        avm::Multiname *stage_mn = nullptr;       // public DisplayObject.stage
+        uint32_t remove_index = 0;                // vtable index of TooltipControl.removeToolTip
+        uint64_t last_run = 0;
+        uint64_t removed_total = 0;
+    } m_tooltips;
+
+    // ShipUpgradeDisplay (upgrade icons in a ship's HUD) subscribes to the map's
+    // lockManager.targetChanged and never unsubscribes: every ship that dies stays alive with its
+    // HUD, traits and 3D model until the map is left. Remove the listeners of displays whose ship
+    // left the map with the game's own Slot.remove() (game thread).
+    void prune_ship_listeners();
+    bool resolve_ship_fix();
+    Atom read_slot(avm::ScriptObject *obj, const char *name);
+
+    struct ShipFix
+    {
+        bool disabled = false;
+        avm::ScriptObject *screen = nullptr;      // ScreenManager (m_screen_manager, checked)
+        uint32_t handler_index = 0;               // vtable index of ShipUpgradeDisplay.handleLockChanged
+        uint32_t remove_index = 0;                // vtable index of Slot.remove
+        uint64_t last_run = 0;
+        uint64_t removed_total = 0;
+        // slot names resolved per class (declared by it or a base class); nullptr: none
+        std::map<std::pair<avm::Traits *, std::string>, avm::Multiname *> slots;
+    } m_ships;
+
     // Max tasks waiting for the game thread; protects against unbounded growth when it stalls.
     static constexpr size_t MAX_PENDING_CALLS = 1024;
 
@@ -235,6 +275,8 @@ private:
                         *m_action_closure = nullptr;
 
     avm::AbcEnv         *abc_env = nullptr;
+
+    avm::GC             *m_gc = nullptr;
 
 };
 

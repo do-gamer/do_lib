@@ -18,6 +18,10 @@ getproperty_t getproperty_f = nullptr;
 typedef void (*setproperty_t)(avm::Toplevel *, Atom, avm::Multiname *, Atom , avm::VTable *);
 setproperty_t  setproperty_f = nullptr;
 
+// Same function as getproperty_f, with its real signature (Toplevel::getproperty is a member)
+typedef Atom (*toplevel_getproperty_t)(avm::Toplevel *, Atom, avm::Multiname *, avm::VTable *);
+toplevel_getproperty_t toplevel_getproperty_f = nullptr;
+
 typedef uintptr_t (*get_traits_binding_t)(avm::Traits *);
 get_traits_binding_t get_traits_binding_f = nullptr;
 
@@ -35,6 +39,8 @@ finddef_t finddef_f = nullptr;
 
 typedef avm::MethodSignature *(*get_method_signature_t)(avm::MethodInfo *mi);
 get_method_signature_t get_method_signature_f = nullptr;
+
+uintptr_t gcheap_instance_slot = 0;
 
 
 subhook::Hook *free_chunk_hook = nullptr;
@@ -120,6 +126,12 @@ uintptr_t flash_stuff::getproperty(uintptr_t obj, avm::Multiname *mm, avm::VTabl
     return getproperty_f(obj, mm, vtable);
 }
 
+Atom flash_stuff::get_property(avm::ScriptObject *obj, avm::Multiname *mn)
+{
+    // atoms of objects carry kObjectType (1) in the low bits
+    return toplevel_getproperty_f(obj->vtable->toplevel, reinterpret_cast<Atom>(obj) | 1, mn, obj->vtable);
+}
+
 void flash_stuff::setproperty(avm::ScriptObject *obj, avm::Multiname *mn, Atom value)
 {
     return setproperty_f(obj->vtable->toplevel, reinterpret_cast<Atom>(obj), mn, value, obj->vtable);
@@ -143,6 +155,15 @@ avm::String *flash_stuff::newstring(avm::AvmCore *core, const std::string &s)
 avm::ScriptObject *flash_stuff::finddef(avm::MethodEnv *env, avm::Multiname *mn)
 {
     return finddef_f(env, mn);
+}
+
+size_t flash_stuff::gc_heap_used_mb()
+{
+    if (!gcheap_instance_slot)
+        return 0;
+    auto *instance_ptr = *reinterpret_cast<uintptr_t **>(gcheap_instance_slot);
+    uintptr_t heap = instance_ptr ? *instance_ptr : 0;
+    return heap ? memory::read<size_t>(heap + offsets::gcheap_num_alloc) * 4096 / (1024 * 1024) : 0;
 }
 
 avm::MethodSignature *flash_stuff::get_method_signature(avm::MethodInfo *mi)
@@ -178,6 +199,7 @@ bool flash_stuff::install()
 
     // function pointers first: the hooks can trigger Darkorbit::install(), which uses them
     getproperty_f           = reinterpret_cast<getproperty_t>(base + offsets::getproperty);
+    toplevel_getproperty_f  = reinterpret_cast<toplevel_getproperty_t>(base + offsets::getproperty);
     setproperty_f           = reinterpret_cast<setproperty_t>(base + offsets::setproperty);
     get_traits_binding_f    = reinterpret_cast<get_traits_binding_t>(base + offsets::get_traits_binding);
     newarray_f              = reinterpret_cast<newarray_t>(base + offsets::newarray);
@@ -186,6 +208,7 @@ bool flash_stuff::install()
     mouse_release_f         = reinterpret_cast<mouse_release_t>(base + offsets::mouse_release);
     mouse_press_f           = reinterpret_cast<mouse_press_t>(base + offsets::mouse_press);
     get_method_signature_f  = reinterpret_cast<get_method_signature_t>(base + offsets::get_method_sig);
+    gcheap_instance_slot    = base + offsets::gcheap_instance_got;
 
     // free_chunk first: verify_jit may lead to install() and hooks that rely on it
     free_chunk_hook = new subhook::Hook(

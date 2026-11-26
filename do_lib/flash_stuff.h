@@ -17,12 +17,18 @@ public:
     static void                 mouse_press(int x, int y, int button);
     static bool                 hasproperty(avm::ScriptObject *obj, const std::string &prop_name);
     static uintptr_t            getproperty(Atom obj, avm::Multiname *mm, avm::VTable *vtable);
+    // Toplevel::getproperty(obj, mn, obj->vtable): the AS3 read obj[mn] (getter or slot). Throws an
+    // AS3 ReferenceError if a sealed object has no such property: only pass exact multinames.
+    static Atom                 get_property(avm::ScriptObject *obj, avm::Multiname *mn);
     static void                 setproperty(avm::ScriptObject *obj, avm::Multiname *mm, Atom value);
     static uintptr_t            gettraitsbinding(avm::Traits *traits);
     static uintptr_t            newarray(avm::MethodEnv *, uint32_t, void *);
     static avm::String          *newstring(avm::AvmCore *, const std::string &s);
     static avm::ScriptObject    *finddef(avm::MethodEnv *, avm::Multiname *);
     static avm::MethodSignature *get_method_signature(avm::MethodInfo *);
+
+    // MMgc heap blocks in use, MB.
+    static size_t               gc_heap_used_mb();
 };
 
 #endif // FLASH_STUFF_H
