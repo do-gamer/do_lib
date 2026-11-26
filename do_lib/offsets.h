@@ -25,6 +25,16 @@ namespace offsets
     // This build's FunctionObject has a code pointer at +0x30 before m_callEnv (measured in memory).
     static const std::ptrdiff_t closure_call_env     = 0x38;      // FunctionObject::m_callEnv (MethodEnv*)
     static const std::ptrdiff_t closure_saved_this   = 0x40;      // MethodClosure::m_savedThis (Atom)
+
+    // avmplus::HeapHashtable, a Dictionary's table (pointer at traits->hashTableOffset), measured
+    static const std::ptrdiff_t hashtable_atoms        = 0x8;   // InlineHashtable::m_atomsAndFlags: atoms block | 3 flag bits
+    static const std::ptrdiff_t hashtable_log_capacity = 0x14;  // InlineHashtable::m_logCapacity (u8): 1 << (n - 1) atoms
+    static const std::ptrdiff_t hashtable_first_atom   = 0x8;   // atoms block: vptr, then key/value atom pairs
+
+    // avmplus::ObjectVectorObject (Vector.<SomeClass>), measured
+    static const std::ptrdiff_t vector_storage         = 0x30;  // list storage block
+    static const std::ptrdiff_t vector_length          = 0x38;  // u32
+    static const std::ptrdiff_t list_first_item        = 0x10;  // list storage block: first atom
 }
 
 #endif // OFFSETS_H

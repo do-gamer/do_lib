@@ -232,7 +232,6 @@ private:
     // left the map with the game's own Slot.remove() (game thread).
     void prune_ship_listeners();
     bool resolve_ship_fix();
-    Atom read_slot(avm::ScriptObject *obj, const char *name);
 
     struct ShipFix
     {
@@ -242,9 +241,104 @@ private:
         uint32_t remove_index = 0;                // vtable index of Slot.remove
         uint64_t last_run = 0;
         uint64_t removed_total = 0;
-        // slot names resolved per class (declared by it or a base class); nullptr: none
-        std::map<std::pair<avm::Traits *, std::string>, avm::Multiname *> slots;
     } m_ships;
+
+    // GreenSock 11 (bundled with the game) takes a finished tween out of its timeline's list but
+    // leaves the tween's own nextNode/prevNode pointing at its old neighbours. Whatever keeps one
+    // finished tween keeps those alive, they keep theirs, ... and each tween its onComplete
+    // closure: one idle ship's MoveTrait tween holds a chain of dead ships until the map is left.
+    // Right before TweenLite.collectRetiredTweens (after the frame's rendering, the only time
+    // GreenSock walks old links) clear the links of the finished tweens in masterList and of the
+    // finished tweens they lead to.
+    void unlink_retired_tweens();
+    bool resolve_tween_fix();
+
+    struct TweenFix
+    {
+        bool disabled = false;
+        avm::ScriptObject *tween_lite = nullptr;  // TweenLite$ (class object: the statics)
+        uint64_t unlinked_total = 0;
+        uint64_t unlinked_unlogged = 0;
+        uint64_t last_log = 0;
+    } m_tweens;
+
+    // away3d (bundled with the game): PrefabView3D.playAnimation() listens for PLAYBACK_COMPLETE on
+    // the node animator.play() returns. That node belongs to the model's animation set, which every
+    // view of the model shares, and the listener only goes away when the animation completes: never
+    // for the looping idle animation. Every ship view ever shown stays alive (meshes, materials)
+    // while its model is loaded. Before PrefabView3D.dispose() remove the view's listener from the
+    // nodes of its animators' animation sets.
+    bool resolve_view_fix();
+    void release_view_listeners(avm::ScriptObject *view);
+    std::vector<avm::ScriptObject *> vector_objects(avm::ScriptObject *vec);
+
+    struct ViewFix
+    {
+        bool disabled = false;
+        bool resolved = false;
+        avm::Multiname *handler_mn = nullptr;     // PrefabView3D.handleAnimPlaybackComplete (private)
+        avm::ScriptObject *event_class = nullptr; // AnimationStateEvent$ (PLAYBACK_COMPLETE)
+        uint64_t released_total = 0;
+        uint64_t released_unlogged = 0;
+        uint64_t last_log = 0;
+    } m_views;
+
+    // PrefabMaterialManager (one per 3D model in use) builds a prototype material only to ask its
+    // texture types. The material subscribes to three static Settings3D signals, and the manager's
+    // dispose() drops it without disposing it: every manager ever created leaves a material with
+    // its shader passes behind. Dispose the prototype right before PrefabMaterialManager.dispose().
+    bool resolve_material_fix();
+    void dispose_material_prototype(avm::ScriptObject *manager);
+
+    struct MaterialFix
+    {
+        bool disabled = false;
+        bool resolved = false;
+        uint64_t disposed_total = 0;
+        uint64_t disposed_unlogged = 0;
+        uint64_t last_log = 0;
+    } m_materials;
+
+    // OutOfRangeEffect3D (the markers shown when attacking out of range) makes up to three marker
+    // meshes per event on its static shared plane and takes them off the screen after 2 s
+    // (removeAndCount) without disposing them: each stays registered with the static geometry and
+    // the shared material forever. Dispose the marker right before removeAndCount().
+    bool resolve_marker_fix();
+    void dispose_marker(avm::ScriptObject *mesh);
+
+    struct MarkerFix
+    {
+        bool disabled = false;
+        bool resolved = false;
+        uint64_t disposed_total = 0;
+        uint64_t disposed_unlogged = 0;
+        uint64_t last_log = 0;
+    } m_markers;
+
+    // away3d's MultiPassMaterialBase (EntityXRayMaterial: ships drawn with the x-ray shader) listens
+    // to the shared light picker for light changes and dispose() never stops it: every disposed
+    // multi-pass material stays alive with its passes. Clear lightPicker (its setter removes the
+    // listener) right before MaterialBase.dispose() of a multi-pass material.
+    bool resolve_light_fix();
+    void release_light_listener(avm::ScriptObject *material);
+
+    struct LightFix
+    {
+        bool disabled = false;
+        bool resolved = false;
+        avm::Traits *multi_pass = nullptr;        // MultiPassMaterialBase (instance traits)
+        avm::Multiname *setter_mn = nullptr;      // MultiPassMaterialBase.lightPicker (setter)
+        uint64_t released_total = 0;
+        uint64_t released_unlogged = 0;
+        uint64_t last_log = 0;
+    } m_lights;
+
+    // Value of / write to a var or const obj's class (or a base class) declares, by name
+    Atom read_slot(avm::ScriptObject *obj, const char *name);
+    bool write_slot(avm::ScriptObject *obj, const char *name, Atom value);
+    avm::Multiname *slot_name(avm::ScriptObject *obj, const char *name);
+    // slot names resolved per class (declared by it or a base class); nullptr: none
+    std::map<std::pair<avm::Traits *, std::string>, avm::Multiname *> m_slot_names;
 
     // Max tasks waiting for the game thread; protects against unbounded growth when it stalls.
     static constexpr size_t MAX_PENDING_CALLS = 1024;

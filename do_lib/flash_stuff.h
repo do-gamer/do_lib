@@ -21,6 +21,9 @@ public:
     // AS3 ReferenceError if a sealed object has no such property: only pass exact multinames.
     static Atom                 get_property(avm::ScriptObject *obj, avm::Multiname *mn);
     static void                 setproperty(avm::ScriptObject *obj, avm::Multiname *mm, Atom value);
+    // Toplevel::setproperty(obj, mn, value, obj->vtable): the AS3 write obj[mn] = value (write
+    // barriers and reference counts included). Same rule as get_property: exact multinames only.
+    static void                 set_property(avm::ScriptObject *obj, avm::Multiname *mn, Atom value);
     static uintptr_t            gettraitsbinding(avm::Traits *traits);
     static uintptr_t            newarray(avm::MethodEnv *, uint32_t, void *);
     static avm::String          *newstring(avm::AvmCore *, const std::string &s);

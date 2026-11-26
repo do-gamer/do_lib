@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <iostream>
 #include <sstream>
 
@@ -280,15 +281,35 @@ static avm::Multiname *declared_slot(avm::Traits *traits, const std::string &nam
 
 // vtable index of the method declared with exactly this name (0: none). Calling methods instead
 // of reading properties: a wrong name can't make the VM throw through our frames.
-static uint32_t method_index(avm::ScriptObject *obj, const std::string &name)
+static uint32_t vtable_method_index(avm::VTable *vtable, const std::string &name)
 {
-    auto methods = obj->vtable->get_methods();
+    auto methods = vtable->get_methods();
     for (uint32_t i = 0; i < methods.size(); i++)
     {
         if (methods[i] && methods[i]->method_info && methods[i]->method_info->name() == name)
             return i;
     }
     return 0;
+}
+
+static uint32_t method_index(avm::ScriptObject *obj, const std::string &name)
+{
+    return vtable_method_index(obj->vtable, name);
+}
+
+// Multiname of a method (or getter/setter) these traits declare themselves, from their own pool:
+// exact, private namespaces included. getproperty of a method binds it (a MethodClosure).
+static avm::Multiname *declared_method(avm::Traits *traits, const std::string &name,
+                                       avm::TraitKind kind = avm::TRAIT_Method)
+{
+    if (!traits || !traits->pool)
+        return nullptr;
+    for (auto &trait : traits->parse_traits().traits)
+    {
+        if (trait.kind == kind && trait.name == name)
+            return traits->pool->get_multiname(trait.name_index);
+    }
+    return nullptr;
 }
 
 // QName (flag 0x02 only: no ATTR, RTNS, RTNAME, NSSET) in the public namespace of a package
@@ -457,15 +478,32 @@ void Darkorbit::prune_tooltips()
     }
 }
 
+// Exact multiname of a slot obj's class (or a base class) declares, nullptr if none
+avm::Multiname *Darkorbit::slot_name(avm::ScriptObject *obj, const char *name)
+{
+    auto key = std::make_pair(obj->vtable->traits, std::string(name));
+    auto it = m_slot_names.find(key);
+    if (it == m_slot_names.end())
+        it = m_slot_names.emplace(key, declared_slot(key.first, key.second)).first;
+    return it->second;
+}
+
 // Value of a slot obj's class (or a base class) declares, 0 if it declares none: getproperty of
 // a name the object doesn't have would throw through our frames
 Atom Darkorbit::read_slot(avm::ScriptObject *obj, const char *name)
 {
-    auto key = std::make_pair(obj->vtable->traits, std::string(name));
-    auto it = m_ships.slots.find(key);
-    if (it == m_ships.slots.end())
-        it = m_ships.slots.emplace(key, declared_slot(key.first, key.second)).first;
-    return it->second ? flash_stuff::get_property(obj, it->second) : 0;
+    avm::Multiname *mn = slot_name(obj, name);
+    return mn ? flash_stuff::get_property(obj, mn) : 0;
+}
+
+// setproperty of a slot obj's class (or a base class) declares; false if it declares none
+bool Darkorbit::write_slot(avm::ScriptObject *obj, const char *name, Atom value)
+{
+    avm::Multiname *mn = slot_name(obj, name);
+    if (!mn)
+        return false;
+    flash_stuff::set_property(obj, mn, value);
+    return true;
 }
 
 bool Darkorbit::resolve_ship_fix()
@@ -563,6 +601,447 @@ void Darkorbit::prune_ship_listeners()
                stale.size(), count, f.removed_total, flash_stuff::gc_heap_used_mb());
 }
 
+bool Darkorbit::resolve_tween_fix()
+{
+    auto &f = m_tweens;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[tweens] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "TweenLite", &why);
+    if (!cls)
+        return disable(why);
+
+    // written for GreenSock 11's lists (SimpleTimeline, TimelineLite, masterList)
+    Atom version = read_slot(cls, "version");
+    if ((version & 7) != 7 || *reinterpret_cast<const double *>(version & ~Atom(7)) != 11.36)
+        return disable("unexpected GreenSock version");
+
+    uint32_t collect = method_index(cls, "collectRetiredTweens");
+    if (!collect)
+        return disable("TweenLite.collectRetiredTweens not found");
+    avm::MethodEnv *env = cls->vtable->methods[collect];
+    if (!env || !env->method_info)
+        return disable("TweenLite.collectRetiredTweens not resolved");
+    // hooks are found by method id: never take over another hook's entry
+    auto it = m_hooks.find(env->method_info->id);
+    if (it != m_hooks.end() && !it->second.removed)
+        return disable("method id already hooked");
+
+    f.tween_lite = cls;
+    hook_flash_function(env, [this](avm::MethodEnv *, uint32_t, uintptr_t *) { unlink_retired_tweens(); });
+    utils::log("[tweens] cleaner ready (GreenSock 11.36, collectRetiredTweens {})\n", collect);
+    return true;
+}
+
+void Darkorbit::unlink_retired_tweens()
+{
+    auto &f = m_tweens;
+    if (f.disabled || !f.tween_lite || !m_installed)
+        return;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[tweens] cleaner disabled: {}\n", why);
+        f.disabled = true;
+    };
+
+    // TweenLite.masterList: a strong Dictionary, target -> Array of its tweens. Finished tweens
+    // stay in it until collectRetiredTweens (the call we run before) takes them out.
+    avm::ScriptObject *dict = as_object(read_slot(f.tween_lite, "masterList"));
+    if (!dict || dict->get_name() != "Dictionary")
+        return disable("TweenLite.masterList isn't a Dictionary");
+    const uint32_t table_at = dict->vtable->traits->hashTableOffset;
+    const uintptr_t table = table_at ? memory::read<uintptr_t>(reinterpret_cast<uintptr_t>(dict) + table_at) : 0;
+    if (!table || avm::get_block_header(reinterpret_cast<void *>(table))->gc != m_gc)
+        return disable("masterList has no hashtable");
+    const uintptr_t block = memory::read<uintptr_t>(table + offsets::hashtable_atoms) & ~uintptr_t(7);
+    const uint8_t log_capacity = memory::read<uint8_t>(table + offsets::hashtable_log_capacity);
+    const size_t capacity = log_capacity ? size_t(1) << (log_capacity - 1) : 0;
+    if (!block || log_capacity > 24 || avm::get_block_header(reinterpret_cast<void *>(block))->gc != m_gc
+        || offsets::hashtable_first_atom + capacity * sizeof(Atom)
+               > avm::get_block_header(reinterpret_cast<void *>(block))->size)
+        return disable("unexpected masterList hashtable");
+    const Atom *atoms = reinterpret_cast<const Atom *>(block + offsets::hashtable_first_atom);
+
+    std::vector<avm::ScriptObject *> todo;
+    for (size_t i = 0; i + 1 < capacity; i += 2)
+    {
+        if (atoms[i] == 0 || atoms[i] == 4)
+            continue; // empty / deleted key
+        auto *list = reinterpret_cast<avm::Array *>(as_object(atoms[i + 1]));
+        if (!list || list->get_name() != "Array" || !list->data || avm::get_block_header(list->data)->gc != m_gc)
+            continue;
+        // dense storage: ListData { vtable, uint32 len, ..., Atom entries[] }
+        const uint32_t dense_len = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(list->data) + 8);
+        for (uint32_t j = 0, n = std::min(list->size, dense_len); j < n; j++)
+        {
+            if (avm::ScriptObject *tween = as_object((*list)[j]))
+                todo.push_back(tween);
+        }
+    }
+
+    // 1) find the finished tweens (gc) out of their timeline's list, then the finished tweens
+    // their old links lead to. A tween whose timeline is disabled stays in its list (the
+    // timeline links it back when enabled): leave those alone. Nothing changes meanwhile.
+    std::vector<avm::ScriptObject *> found;
+    std::unordered_set<avm::ScriptObject *> seen;
+    while (!todo.empty() && found.size() < 50000)
+    {
+        avm::ScriptObject *tween = todo.back();
+        todo.pop_back();
+        if (!seen.insert(tween).second || avm::get_block_header(tween)->gc != m_gc)
+            continue;
+        if (read_slot(tween, "gc") != avm::TRUE)
+            continue; // in a timeline's list (or not a tween): its links are live
+        avm::ScriptObject *timeline = as_object(read_slot(tween, "timeline"));
+        if (timeline && read_slot(timeline, "gc") == avm::TRUE)
+            continue;
+        avm::ScriptObject *next = as_object(read_slot(tween, "nextNode"));
+        avm::ScriptObject *prev = as_object(read_slot(tween, "prevNode"));
+        if (!next && !prev)
+            continue;
+        found.push_back(tween);
+        if (next)
+            todo.push_back(next);
+        if (prev)
+            todo.push_back(prev);
+    }
+
+    // 2) clear their links, last found first: a tween found through another one's link is
+    // cleared while that link still keeps it alive (setproperty updates reference counts)
+    for (auto it = found.rbegin(); it != found.rend(); ++it)
+    {
+        write_slot(*it, "nextNode", NULL_ATOM);
+        write_slot(*it, "prevNode", NULL_ATOM);
+    }
+
+    f.unlinked_total += found.size();
+    f.unlinked_unlogged += found.size();
+    const uint64_t now = flash_ipc::now_ms();
+    if (f.unlinked_unlogged && now - f.last_log >= 60000)
+    {
+        utils::log("[tweens] unlinked {} finished tweens ({} in total), GC heap {} MB\n",
+                   f.unlinked_unlogged, f.unlinked_total, flash_stuff::gc_heap_used_mb());
+        f.unlinked_unlogged = 0;
+        f.last_log = now;
+    }
+}
+
+// Elements of a Vector.<SomeClass> (ObjectVectorObject: storage block, u32 length, atoms from the
+// block's first item; measured). Empty for anything else.
+std::vector<avm::ScriptObject *> Darkorbit::vector_objects(avm::ScriptObject *vec)
+{
+    std::vector<avm::ScriptObject *> out;
+    if (!vec)
+        return out;
+    const std::string name = vec->get_name();
+    if (name.rfind("Vector.<", 0) != 0 || name.back() == '$' || name == "Vector.<int>"
+        || name == "Vector.<uint>" || name == "Vector.<Number>")
+        return out;
+    const uintptr_t base = reinterpret_cast<uintptr_t>(vec);
+    const uintptr_t storage = memory::read<uintptr_t>(base + offsets::vector_storage);
+    const uint32_t length = memory::read<uint32_t>(base + offsets::vector_length);
+    if (!storage || avm::get_block_header(reinterpret_cast<void *>(storage))->gc != m_gc
+        || offsets::list_first_item + size_t(length) * sizeof(Atom)
+               > avm::get_block_header(reinterpret_cast<void *>(storage))->size)
+        return out;
+    for (uint32_t i = 0; i < length; i++)
+    {
+        if (avm::ScriptObject *o = as_object(memory::read<Atom>(storage + offsets::list_first_item + i * sizeof(Atom))))
+            out.push_back(o);
+    }
+    return out;
+}
+
+bool Darkorbit::resolve_view_fix()
+{
+    auto &f = m_views;
+    f.resolved = true;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[views] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "PrefabView3D", &why);
+    if (!cls)
+        return disable(why);
+    avm::VTable *ivtable = cls->vtable->ivtable;   // what PrefabView3D instances (and ShipView3D) use
+    if (!ivtable || !ivtable->traits || ivtable->traits->name() != "PrefabView3D")
+        return disable("unexpected PrefabView3D class");
+    avm::Multiname *handler = declared_method(ivtable->traits, "handleAnimPlaybackComplete");
+    if (!handler)
+        return disable("PrefabView3D.handleAnimPlaybackComplete not found");
+    avm::ScriptObject *events = find_class(m_const_pool, m_main, "AnimationStateEvent", &why);
+    if (!events)
+        return disable(why);
+    if ((read_slot(events, "PLAYBACK_COMPLETE") & 7) != 2)   // kStringType
+        return disable("AnimationStateEvent.PLAYBACK_COMPLETE isn't a String");
+
+    uint32_t dispose = vtable_method_index(ivtable, "dispose");
+    avm::MethodEnv *env = dispose ? ivtable->methods[dispose] : nullptr;
+    if (!env || !env->method_info || env->method_info->name() != "dispose")
+        return disable("PrefabView3D.dispose not found");
+    auto it = m_hooks.find(env->method_info->id);
+    if (it != m_hooks.end() && !it->second.removed)
+        return disable("method id already hooked");
+
+    f.handler_mn = handler;
+    f.event_class = events;
+    hook_flash_function(env, [this](avm::MethodEnv *, uint32_t, uintptr_t *argv)
+    {
+        release_view_listeners(avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[0])));
+    });
+    utils::log("[views] cleaner ready (PrefabView3D.dispose {})\n", dispose);
+    return true;
+}
+
+// Runs before PrefabView3D.dispose() (which drops the view's animators)
+void Darkorbit::release_view_listeners(avm::ScriptObject *view)
+{
+    auto &f = m_views;
+    if (f.disabled || !f.handler_mn || !m_installed || !view || avm::get_block_header(view)->gc != m_gc)
+        return;
+
+    Atom type = read_slot(f.event_class, "PLAYBACK_COMPLETE");
+    if ((type & 7) != 2)
+        return;
+    std::vector<avm::ScriptObject *> nodes;
+    for (avm::ScriptObject *animator : vector_objects(as_object(read_slot(view, "_animators"))))
+    {
+        avm::ScriptObject *set = as_object(read_slot(animator, "_animationSet"));
+        if (set)
+        {
+            for (avm::ScriptObject *node : vector_objects(as_object(read_slot(set, "_animations"))))
+                nodes.push_back(node);
+        }
+    }
+    if (nodes.empty())
+        return;
+
+    // this.handleAnimPlaybackComplete, as playAnimation() registered it (closures of the same
+    // method and object are the same listener)
+    Atom handler = flash_stuff::get_property(view, f.handler_mn);
+    if (!is_object_atom(handler))
+        return;
+    for (avm::ScriptObject *node : nodes)
+    {
+        uint32_t remove = method_index(node, "removeEventListener");
+        if (remove)   // EventDispatcher.removeEventListener(type, listener); absent: nothing happens
+            node->call(remove, type & ~Atom(7), handler & ~Atom(7));
+    }
+
+    f.released_total++;
+    f.released_unlogged++;
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_log >= 60000)
+    {
+        utils::log("[views] released {} disposed 3D views ({} in total), GC heap {} MB\n",
+                   f.released_unlogged, f.released_total, flash_stuff::gc_heap_used_mb());
+        f.released_unlogged = 0;
+        f.last_log = now;
+    }
+}
+
+bool Darkorbit::resolve_material_fix()
+{
+    auto &f = m_materials;
+    f.resolved = true;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[materials] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "PrefabMaterialManager", &why);
+    if (!cls)
+        return disable(why);
+    avm::VTable *ivtable = cls->vtable->ivtable;
+    if (!ivtable || !ivtable->traits || ivtable->traits->name() != "PrefabMaterialManager")
+        return disable("unexpected PrefabMaterialManager class");
+    if (!declared_slot(ivtable->traits, "_materialPrototype") || !declared_slot(ivtable->traits, "_disposed"))
+        return disable("PrefabMaterialManager fields not found");
+
+    uint32_t dispose = vtable_method_index(ivtable, "dispose");
+    avm::MethodEnv *env = dispose ? ivtable->methods[dispose] : nullptr;
+    if (!env || !env->method_info || env->method_info->name() != "dispose")
+        return disable("PrefabMaterialManager.dispose not found");
+    auto it = m_hooks.find(env->method_info->id);
+    if (it != m_hooks.end() && !it->second.removed)
+        return disable("method id already hooked");
+
+    hook_flash_function(env, [this](avm::MethodEnv *, uint32_t, uintptr_t *argv)
+    {
+        dispose_material_prototype(avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[0])));
+    });
+    utils::log("[materials] cleaner ready (PrefabMaterialManager.dispose {})\n", dispose);
+    return true;
+}
+
+// Runs before PrefabMaterialManager.dispose() (which drops _materialPrototype)
+void Darkorbit::dispose_material_prototype(avm::ScriptObject *manager)
+{
+    auto &f = m_materials;
+    if (f.disabled || !m_installed || !manager || avm::get_block_header(manager)->gc != m_gc)
+        return;
+    if (read_slot(manager, "_disposed") != avm::FALSE)
+        return; // disposed before: dispose() returns right away
+    avm::ScriptObject *prototype = as_object(read_slot(manager, "_materialPrototype"));
+    if (!prototype)
+        return;
+    uint32_t dispose = method_index(prototype, "dispose");
+    if (!dispose)
+        return;
+    prototype->call(dispose);   // the material's own dispose(): leaves the Settings3D signals
+
+    f.disposed_total++;
+    f.disposed_unlogged++;
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_log >= 60000)
+    {
+        utils::log("[materials] disposed {} prototype materials of freed managers ({} in total), GC heap {} MB\n",
+                   f.disposed_unlogged, f.disposed_total, flash_stuff::gc_heap_used_mb());
+        f.disposed_unlogged = 0;
+        f.last_log = now;
+    }
+}
+
+bool Darkorbit::resolve_marker_fix()
+{
+    auto &f = m_markers;
+    f.resolved = true;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[markers] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "OutOfRangeEffect3D", &why);
+    if (!cls)
+        return disable(why);
+    avm::VTable *ivtable = cls->vtable->ivtable;
+    if (!ivtable || !ivtable->traits || ivtable->traits->name() != "OutOfRangeEffect3D")
+        return disable("unexpected OutOfRangeEffect3D class");
+
+    uint32_t remove = vtable_method_index(ivtable, "removeAndCount");
+    avm::MethodEnv *env = remove ? ivtable->methods[remove] : nullptr;
+    if (!env || !env->method_info || env->method_info->name() != "removeAndCount")
+        return disable("OutOfRangeEffect3D.removeAndCount not found");
+    auto it = m_hooks.find(env->method_info->id);
+    if (it != m_hooks.end() && !it->second.removed)
+        return disable("method id already hooked");
+
+    hook_flash_function(env, [this](avm::MethodEnv *, uint32_t argc, uintptr_t *argv)
+    {
+        if (argc >= 1)   // removeAndCount(mesh, type)
+            dispose_marker(avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[1])));
+    });
+    utils::log("[markers] cleaner ready (OutOfRangeEffect3D.removeAndCount {})\n", remove);
+    return true;
+}
+
+// Runs before OutOfRangeEffect3D.removeAndCount(mesh): Mesh.dispose() takes it off its parent (what
+// removeAndCount would do) and unregisters it from the shared geometry and material
+void Darkorbit::dispose_marker(avm::ScriptObject *mesh)
+{
+    auto &f = m_markers;
+    if (f.disabled || !m_installed || !mesh || avm::get_block_header(mesh)->gc != m_gc || mesh->get_name() != "Mesh")
+        return;
+    uint32_t dispose = method_index(mesh, "dispose");
+    if (!dispose)
+        return;
+    mesh->call(dispose);
+
+    f.disposed_total++;
+    f.disposed_unlogged++;
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_log >= 60000)
+    {
+        utils::log("[markers] disposed {} out of range markers ({} in total), GC heap {} MB\n",
+                   f.disposed_unlogged, f.disposed_total, flash_stuff::gc_heap_used_mb());
+        f.disposed_unlogged = 0;
+        f.last_log = now;
+    }
+}
+
+bool Darkorbit::resolve_light_fix()
+{
+    auto &f = m_lights;
+    f.resolved = true;
+    auto disable = [&f](const char *why)
+    {
+        utils::log("[lights] cleaner disabled: {}\n", why);
+        f.disabled = true;
+        return false;
+    };
+
+    const char *why = nullptr;
+    avm::ScriptObject *cls = find_class(m_const_pool, m_main, "MultiPassMaterialBase", &why);
+    if (!cls)
+        return disable(why);
+    avm::VTable *ivtable = cls->vtable->ivtable;
+    if (!ivtable || !ivtable->traits || ivtable->traits->name() != "MultiPassMaterialBase")
+        return disable("unexpected MultiPassMaterialBase class");
+    avm::Multiname *setter = declared_method(ivtable->traits, "lightPicker", avm::TRAIT_Setter);
+    if (!setter || !declared_slot(ivtable->traits, "_lightPicker"))
+        return disable("MultiPassMaterialBase.lightPicker not found");
+
+    // MaterialBase.dispose(), inherited (the entity materials reach it through super.dispose())
+    uint32_t dispose = vtable_method_index(ivtable, "dispose");
+    avm::MethodEnv *env = dispose ? ivtable->methods[dispose] : nullptr;
+    if (!env || !env->method_info || env->method_info->name() != "dispose")
+        return disable("MaterialBase.dispose not found");
+    auto it = m_hooks.find(env->method_info->id);
+    if (it != m_hooks.end() && !it->second.removed)
+        return disable("method id already hooked");
+
+    f.multi_pass = ivtable->traits;
+    f.setter_mn = setter;
+    hook_flash_function(env, [this](avm::MethodEnv *, uint32_t, uintptr_t *argv)
+    {
+        release_light_listener(avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[0])));
+    });
+    utils::log("[lights] cleaner ready (MaterialBase.dispose {})\n", dispose);
+    return true;
+}
+
+// Runs before MaterialBase.dispose() (any material)
+void Darkorbit::release_light_listener(avm::ScriptObject *material)
+{
+    auto &f = m_lights;
+    if (f.disabled || !f.setter_mn || !m_installed || !material || avm::get_block_header(material)->gc != m_gc)
+        return;
+    bool multi_pass = false;
+    avm::Traits *t = material->vtable->traits;
+    for (int depth = 0; t && depth < 32 && !multi_pass; t = t->base, depth++)
+        multi_pass = t == f.multi_pass;
+    if (!multi_pass || !is_object_atom(read_slot(material, "_lightPicker")))
+        return;
+    // material.lightPicker = null: the (most derived) setter removes its light picker listener
+    flash_stuff::set_property(material, f.setter_mn, NULL_ATOM);
+
+    f.released_total++;
+    f.released_unlogged++;
+    const uint64_t now = flash_ipc::now_ms();
+    if (now - f.last_log >= 60000)
+    {
+        utils::log("[lights] released {} disposed multi-pass materials ({} in total), GC heap {} MB\n",
+                   f.released_unlogged, f.released_total, flash_stuff::gc_heap_used_mb());
+        f.released_unlogged = 0;
+        f.last_log = now;
+    }
+}
+
 void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t *argv)
 {
     m_ipc.Heartbeat();
@@ -575,6 +1054,36 @@ void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t
     prune_ship_listeners();
     if (!m_installed)
         return;
+    if (!m_tweens.disabled && !m_tweens.tween_lite)
+    {
+        resolve_tween_fix();   // then runs from its own hook
+        if (!m_installed)
+            return;
+    }
+    if (!m_views.resolved)
+    {
+        resolve_view_fix();    // then runs from its own hook
+        if (!m_installed)
+            return;
+    }
+    if (!m_materials.resolved)
+    {
+        resolve_material_fix(); // then runs from its own hook
+        if (!m_installed)
+            return;
+    }
+    if (!m_markers.resolved)
+    {
+        resolve_marker_fix();   // then runs from its own hook
+        if (!m_installed)
+            return;
+    }
+    if (!m_lights.resolved)
+    {
+        resolve_light_fix();    // then runs from its own hook
+        if (!m_installed)
+            return;
+    }
 
     // Run the tasks outside the lock: they call into the VM, which may re-enter us
     // (GC -> free_chunk -> uninstall) and the ipc thread must be able to queue meanwhile.
@@ -810,6 +1319,12 @@ bool Darkorbit::install(uintptr_t main_app_address)
     m_gc              = avm::get_block_header(m_main)->gc;
     m_tooltips        = TooltipFix{}; // a new game: resolve the TooltipControl again
     m_ships           = ShipFix{};
+    m_tweens          = TweenFix{};
+    m_views           = ViewFix{};
+    m_materials       = MaterialFix{};
+    m_markers         = MarkerFix{};
+    m_lights          = LightFix{};
+    m_slot_names.clear();
     m_screen_manager  = m_main->get_at<avm::ScriptObject *>(0x1f8);
     m_gui_manager     = m_main->get_at<avm::ScriptObject *>(0x200);
     m_event_manager   = m_screen_manager->get_at<avm::ScriptObject *>(0xc8);

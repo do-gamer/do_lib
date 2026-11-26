@@ -168,12 +168,22 @@ Logs are written to `logs/<start time>_TanosApi.log` (bot client, browser and fl
 process share one file). Set `TANOS_DEBUG=1` in the bot's environment to also log flash
 hook activity (JIT verifications, GC chunk frees).
 
-do_lib works around two memory leaks of the game client: tooltips of discarded action bar
-elements and dead ships kept alive by their HUD's lock listener. Both cleaners run on the
-game thread every 15 s and log `[tooltip] cleaner ready` / `[ships] cleaner ready` at
-start, then what they removed (`[tooltip] removed ...`, `[ships] released ...`). If a
-game update changes the classes they rely on, they log `cleaner disabled: <reason>` and
-stay off.
+do_lib works around memory leaks of the game client, on the game thread, using the game's
+own methods. Each cleaner logs `[<name>] cleaner ready` at start, then what it released:
+
+| Log tag | Leak |
+|---|---|
+| `[tooltip]` | tooltips of discarded action bar elements |
+| `[ships]` | dead ships kept alive by their HUD's lock listener |
+| `[tweens]` | finished GreenSock tweens keep their old list links (chains of dead ships) |
+| `[views]` | ship 3D views stay registered on shared animation nodes |
+| `[materials]` | material managers never dispose their prototype material |
+| `[markers]` | out of range markers are never disposed |
+| `[lights]` | disposed multi-pass materials stay registered on the shared light picker |
+
+`[tooltip]` and `[ships]` run every 15 s, the others hook the game method where the leak
+starts. If a game update changes the classes they rely on, they log
+`cleaner disabled: <reason>` and stay off.
 
 Leftover shared memory segments from older versions (killed flash processes) can be
 listed with `ipcs -m` (1024 byte segments with `nattch 0`) and removed with `ipcrm -m <id>`.

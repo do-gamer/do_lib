@@ -137,6 +137,12 @@ void flash_stuff::setproperty(avm::ScriptObject *obj, avm::Multiname *mn, Atom v
     return setproperty_f(obj->vtable->toplevel, reinterpret_cast<Atom>(obj), mn, value, obj->vtable);
 }
 
+void flash_stuff::set_property(avm::ScriptObject *obj, avm::Multiname *mn, Atom value)
+{
+    // atoms of objects carry kObjectType (1) in the low bits
+    setproperty_f(obj->vtable->toplevel, reinterpret_cast<Atom>(obj) | 1, mn, value, obj->vtable);
+}
+
 uintptr_t flash_stuff::gettraitsbinding(avm::Traits *traits)
 {
     return get_traits_binding_f(traits);
