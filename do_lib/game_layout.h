@@ -55,6 +55,9 @@ public:
     avm::ScriptObject *class_object(avm::Traits *itraits);
     // the name is one of the specs (a game name), not one of Flash's own
     bool known(const char *name, Kind kind) const;
+    // the exact name of the position-th field the class of traits declares itself (nullptr if
+    // none): for objects reached through a member, whose class is too plain to find by structure
+    avm::Multiname *own_field(avm::Traits *traits, uint16_t position);
 
 private:
     struct Found

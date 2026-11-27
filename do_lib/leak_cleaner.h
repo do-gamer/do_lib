@@ -88,6 +88,7 @@ private:
     Atom read_slot(avm::ScriptObject *obj, const char *name);
     bool write_slot(avm::ScriptObject *obj, const char *name, Atom value);
     avm::Multiname *slot_name(avm::ScriptObject *obj, const char *name);
+    avm::Multiname *own_field(avm::ScriptObject *obj, uint16_t position);
     // vtable index of a method of obj's class (0: none)
     uint32_t method_of(avm::ScriptObject *obj, const char *name);
     // obj's class is exactly this one
@@ -261,7 +262,7 @@ private:
     // collector, clear those entries (the frame fills them again when it needs them).
     bool resolve_renders();
     void clear_stale_entries(avm::ScriptObject *collector);
-    uint64_t clear_pool_entries(avm::ScriptObject *pool, const char *field);
+    uint64_t clear_pool_entries(avm::ScriptObject *pool, uint16_t position);
     std::unordered_map<avm::ScriptObject *, uint64_t> m_render_passes;   // collector -> last pass (ms)
 
     Darkorbit &m_game;

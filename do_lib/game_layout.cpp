@@ -522,6 +522,13 @@ bool GameLayout::known(const char *name, Kind kind) const
     return m_known[kind].count(name) != 0;
 }
 
+avm::Multiname *GameLayout::own_field(avm::Traits *traits, uint16_t position)
+{
+    const Spec spec { "", nullptr, FIELD, false, 0, position };
+    Binding b;
+    return traits && traits->pool == m_pool && member_at(traits, spec, b) ? b.name : nullptr;
+}
+
 // The class' own QName in the pool (same name and namespace as its traits), then the definition:
 // finddef/getproperty only ever get the exact name of a class that exists
 avm::ScriptObject *GameLayout::class_object(avm::Traits *itraits)

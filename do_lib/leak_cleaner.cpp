@@ -204,8 +204,6 @@ static const GameLayout::Spec SPECS[] = {
     { "RenderableListItemPool", nullptr, GameLayout::CLASS, false, 0x2c21d9b015ce4ddf, 0 },
     { "RenderableListItemPool", "_pool", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 0 },
     { "RenderableListItemPool", "_index", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 1 },
-    { "EntityListItem", "entity", GameLayout::FIELD, false, 0x236f5a36b6d0a3d1, 0 },
-    { "RenderableListItem", "renderable", GameLayout::FIELD, false, 0x6aba08e97e920cc2, 1 },
 };
 
 // ---- common ----
@@ -449,6 +447,20 @@ avm::Multiname *LeakCleaner::slot_name(avm::ScriptObject *obj, const char *name)
         const GameLayout::Binding *b = m_layout.member(obj->vtable->traits, name, GameLayout::FIELD);
         it = m_slot_names.emplace(key, b ? b->name : nullptr).first;
     }
+    return it->second;
+}
+
+// Exact name of the position-th field obj's own class declares, nullptr if none
+avm::Multiname *LeakCleaner::own_field(avm::ScriptObject *obj, uint16_t position)
+{
+    static const char *const TAGS[] = { "#0", "#1", "#2", "#3" };   // cache keys, apart from slot names
+    if (position >= sizeof(TAGS) / sizeof(TAGS[0]))
+        return nullptr;
+    check_caches();
+    const LookupKey key { obj->vtable->traits, TAGS[position] };
+    auto it = m_slot_names.find(key);
+    if (it == m_slot_names.end())
+        it = m_slot_names.emplace(key, m_layout.own_field(obj->vtable->traits, position)).first;
     return it->second;
 }
 
@@ -1360,25 +1372,40 @@ void LeakCleaner::clear_stale_entries(avm::ScriptObject *collector)
     if (now - last < 15000)
         return;
     last = now;
-    count(RENDERS, clear_pool_entries(as_object(read_slot(collector, "_entityListItemPool")), "entity")
-                       + clear_pool_entries(as_object(read_slot(collector, "_renderableListItemPool")), "renderable"));
+    // EntityListItem.entity, RenderableListItem.renderable
+    count(RENDERS, clear_pool_entries(as_object(read_slot(collector, "_entityListItemPool")), 0)
+                       + clear_pool_entries(as_object(read_slot(collector, "_renderableListItemPool")), 1));
 }
 
-// The pool's entries past the last frame's (_index, until clear() resets it): their old object
-uint64_t LeakCleaner::clear_pool_entries(avm::ScriptObject *pool, const char *field)
+// The pool's entries past the last frame's (_index, until clear() resets it): their old object.
+// The entry classes (two plain fields) are too common to find by structure, so the field is
+// taken by its position in the entries' own class (a wrong one is harmless: an unused entry's
+// fields are all set again when the pool hands it out).
+uint64_t LeakCleaner::clear_pool_entries(avm::ScriptObject *pool, uint16_t position)
 {
     if (!ours(pool))
         return 0;
     const Atom index = read_slot(pool, "_index");
     if ((index & 7) != 6)   // an int
         return 0;
-    const intptr_t used = intptr_t(index) >> 3;
+    const size_t used = intptr_t(index) > 0 ? size_t(intptr_t(index) >> 3) : 0;
     const auto entries = vector_objects(as_object(read_slot(pool, "_pool")));   // never has holes
+    if (used >= entries.size() || !ours(entries[used]))
+        return 0;
+    avm::Traits *traits = entries[used]->vtable->traits;
+    avm::Multiname *field = own_field(entries[used], position);
+    if (!field)
+        return 0;
     uint64_t cleared = 0;
-    for (size_t i = used > 0 ? size_t(used) : 0; i < entries.size(); i++)
+    for (size_t i = used; i < entries.size(); i++)
     {
-        if (ours(entries[i]) && is_object_atom(read_slot(entries[i], field)) && write_slot(entries[i], field, NULL_ATOM))
+        if (!ours(entries[i]) || entries[i]->vtable->traits != traits)
+            continue;
+        if (is_object_atom(flash_stuff::get_property(entries[i], field)))
+        {
+            flash_stuff::set_property(entries[i], field, NULL_ATOM);
             cleared++;
+        }
     }
     return cleared;
 }
