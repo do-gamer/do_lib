@@ -89,9 +89,9 @@ static const GameLayout::Spec SPECS[] = {
     { "TooltipControl", nullptr, GameLayout::CLASS, false, 0x350181e4aa48e2c2, 0 },
     { "TooltipControl", "getInstance", GameLayout::METHOD, true, 0x5a278a8946349fd1, 1 },
     { "TooltipControl", "toolTipsList", GameLayout::FIELD, false, 0x350181e4aa48e2c2, 0 },
-    { "TooltipControl", "removeToolTip", GameLayout::METHOD, false, 0x350181e4aa48e2c2, 5 },
     { "ToolTipHook", nullptr, GameLayout::CLASS, false, 0xc58eff1d2de7d2d9, 0 },
     { "ToolTipHook", "getTargetObject", GameLayout::METHOD, false, 0xc58eff1d2de7d2d9, 9 },
+    { "ToolTipHook", "suicide", GameLayout::METHOD, false, 0xc58eff1d2de7d2d9, 10 },
     { "ScreenManager", nullptr, GameLayout::CLASS, false, 0xf6b0d1fc950a1848, 0 },
     { "ScreenManager", "_map", GameLayout::FIELD, false, 0xf6b0d1fc950a1848, 35 },
     { "Map", nullptr, GameLayout::CLASS, false, 0xd2d589e467c41eb6, 0 },
@@ -562,9 +562,6 @@ bool LeakCleaner::resolve_tooltips()
     avm::Multiname *list_mn = slot_name(control, "toolTipsList");
     if (!list_mn)
         return disable(TOOLTIPS, "TooltipControl.toolTipsList not found");
-    uint32_t remove_index = method_of(control, "removeToolTip");
-    if (!remove_index)
-        return disable(TOOLTIPS, "TooltipControl.removeToolTip not found");
 
     // DisplayObject.stage, read only on hook targets (InteractiveObjects, never anything else)
     avm::Multiname *stage_mn = public_qname(m_game.m_const_pool, "", "stage");
@@ -574,7 +571,6 @@ bool LeakCleaner::resolve_tooltips()
     m_tooltips.control = control;
     m_tooltips.list_mn = list_mn;
     m_tooltips.stage_mn = stage_mn;
-    m_tooltips.remove_index = remove_index;
     return ready(TOOLTIPS);
 }
 
@@ -600,39 +596,66 @@ void LeakCleaner::prune_tooltips()
     const uint32_t dense_len = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(list->data) + 8);
     const uint32_t listed = std::min(list->size, dense_len);
 
-    // collect first: removeToolTip splices the list. The targets stay referenced by the list
-    // until their own removal, so the GC can't free them meanwhile.
+    // one walk: the hooks whose target left the stage, and the ones to keep
     std::vector<avm::ScriptObject *> stale;
-    for (uint32_t i = 0; i < listed && stale.size() < 150; i++)
+    std::vector<Atom> keep;
+    keep.reserve(listed);
+    for (uint32_t i = 0; i < listed; i++)
     {
-        Atom hook_atom = (*list)[i];
-        if (!is_object_atom(hook_atom))
-            continue;
-        auto *hook = reinterpret_cast<avm::ScriptObject *>(avm::remove_kind(hook_atom));
-        if (!is_class(hook, "ToolTipHook"))
-            continue; // e.g. a subclass: leave it alone
-        if (!f.get_target_index && !(f.get_target_index = method_of(hook, "getTargetObject")))
+        const Atom hook_atom = (*list)[i];
+        avm::ScriptObject *hook = as_object(hook_atom);
+        avm::ScriptObject *target = nullptr;
+        if (hook && is_class(hook, "ToolTipHook"))   // e.g. a subclass: leave it alone
         {
-            disable(TOOLTIPS, "ToolTipHook.getTargetObject not found");
-            return;
+            if (!f.get_target_index && !(f.get_target_index = method_of(hook, "getTargetObject")))
+            {
+                disable(TOOLTIPS, "ToolTipHook.getTargetObject not found");
+                return;
+            }
+            if (!f.suicide_index && !(f.suicide_index = method_of(hook, "suicide")))
+            {
+                disable(TOOLTIPS, "ToolTipHook.suicide not found");
+                return;
+            }
+            target = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(hook->call(f.get_target_index)));
         }
-        auto *target = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(hook->call(f.get_target_index)));
-        if (!target)
-            continue;
-        Atom stage = flash_stuff::get_property(target, f.stage_mn);
-        if (stage == NULL_ATOM)
+        if (target)
         {
-            stale.push_back(target);
+            Atom stage = flash_stuff::get_property(target, f.stage_mn);
+            if (stage == NULL_ATOM)
+            {
+                stale.push_back(hook);
+                continue;
+            }
+            if (!is_object_atom(stage) || !is_class(as_object(stage), "Stage"))
+            {
+                disable(TOOLTIPS, "'stage' didn't read a Stage");
+                return;
+            }
         }
-        else if (!is_object_atom(stage) || !is_class(as_object(stage), "Stage"))
-        {
-            disable(TOOLTIPS, "'stage' didn't read a Stage");
-            return;
-        }
+        keep.push_back(hook_atom);
     }
+    if (stale.empty())
+        return;
 
-    for (auto *target : stale)
-        f.control->call(f.remove_index, target);   // TooltipControl.removeToolTip(target)
+    // What TooltipControl.removeToolTip(target) does for each, without its walk of the whole list
+    // per target (thousands of hooks after the GUI is rebuilt): the hook's own suicide() (removes
+    // its listeners from the target), then the list without them. Until the new list is set the
+    // old one keeps all hooks alive; the new one is an Array of the same atoms, set through
+    // setproperty (write barriers and reference counts included).
+    for (avm::ScriptObject *hook : stale)
+    {
+        hook->call(f.suicide_index);
+        if (!installed())
+            return;
+    }
+    if (flash_stuff::get_property(f.control, f.list_mn) != list_atom || list->size != listed)
+        return; // the game changed the list meanwhile: the next pass finds these hooks again
+    auto *fresh = reinterpret_cast<avm::ScriptObject *>(
+        flash_stuff::newarray(stale.front()->vtable->methods[f.get_target_index], uint32_t(keep.size()), keep.data()));
+    if (!ours(fresh) || !is_class(fresh, "Array"))
+        return;
+    flash_stuff::set_property(f.control, f.list_mn, reinterpret_cast<Atom>(fresh) | 1);
     count(TOOLTIPS, stale.size());
 }
 

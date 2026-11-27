@@ -118,7 +118,8 @@ private:
 
     // tooltips: the game never unregisters the tooltips of action bar elements it throws away,
     // the TooltipControl singleton keeps them (and their whole display tree) forever. Every 15 s
-    // remove the tooltips of objects that left the stage with the game's own removeToolTip.
+    // remove the tooltips of objects that left the stage: each hook's own suicide(), then the
+    // list without them (what removeToolTip does, in one pass over the list).
     bool resolve_tooltips();
     void prune_tooltips();
     struct
@@ -127,7 +128,7 @@ private:
         avm::Multiname *list_mn = nullptr;        // TooltipControl.toolTipsList
         uint32_t get_target_index = 0;            // vtable index of ToolTipHook.getTargetObject
         avm::Multiname *stage_mn = nullptr;       // public DisplayObject.stage
-        uint32_t remove_index = 0;                // vtable index of TooltipControl.removeToolTip
+        uint32_t suicide_index = 0;               // vtable index of ToolTipHook.suicide
     } m_tooltips;
 
     // ships: ShipUpgradeDisplay (upgrade icons in a ship's HUD) subscribes to the map's
