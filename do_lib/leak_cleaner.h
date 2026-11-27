@@ -38,7 +38,8 @@ public:
 private:
     enum Part
     {
-        TOOLTIPS, SHIPS, TWEENS, VIEWS, MATERIALS, MARKERS, LIGHTS, ROCKETS, ROBOTS, CANNONS, MODELS, PART_COUNT
+        TOOLTIPS, SHIPS, TWEENS, VIEWS, MATERIALS, MARKERS, LIGHTS, ROCKETS, ROBOTS, CANNONS, MODELS, POOLS, ZONES,
+        RENDERS, PART_COUNT
     };
 
     struct Stats
@@ -184,16 +185,23 @@ private:
     bool resolve_markers();
     void dispose_marker(avm::ScriptObject *mesh);
 
-    // lights: away3d's MultiPassMaterialBase (EntityXRayMaterial: ships drawn with the x-ray
-    // shader) listens to the shared light picker for light changes and dispose() never stops it:
-    // every disposed multi-pass material stays alive with its passes. Clear lightPicker (its setter
-    // removes the listener) right before MaterialBase.dispose() of a multi-pass material.
+    // lights: away3d's materials listen to the shared light picker for light changes through their
+    // passes, and dispose() misses some of these listeners: the disposed material stays alive with
+    // its passes. Right before MaterialBase.dispose():
+    // - MultiPassMaterialBase (EntityXRayMaterial: ships drawn with the x-ray shader) never stops
+    //   its own listener: clear lightPicker (its setter removes the listener);
+    // - SinglePassMaterialBase (EntityBasicMaterial) disposes only the passes it last rendered
+    //   with. The passes of its shader methods (outline) get the light picker when the shader is
+    //   compiled, so a material never rendered since (the material managers' prototypes) leaves
+    //   them registered: dispose its screen pass' method passes that are not in its own list.
     bool resolve_lights();
     void release_light_listener(avm::ScriptObject *material);
+    bool dispose_method_passes(avm::ScriptObject *material);
     struct
     {
         avm::Traits *multi_pass = nullptr;        // MultiPassMaterialBase (instance traits)
         avm::Multiname *setter_mn = nullptr;      // MultiPassMaterialBase.lightPicker (setter)
+        avm::Traits *single_pass = nullptr;       // SinglePassMaterialBase (instance traits), optional
     } m_lights;
 
     // rockets: heat seeking rockets (Rocket3D, BezierRocket3D, TripleBezierRocket3D) carry a marker
@@ -229,6 +237,32 @@ private:
     // collection, with the entry.
     bool resolve_models();
     void release_use_counter(avm::ScriptObject *loader, avm::ScriptObject *content);
+
+    // pools: ObjectsPool.clearPool() (every map reset) empties all pools but only disposes the
+    // IDisposable objects and particle groups: the pooled rocket meshes (clones on their class'
+    // static plane and shared material) stay registered there forever, up to 48 per rocket type
+    // and map change. Right before clearPool() dispose the meshes still in the pools.
+    bool resolve_pools();
+    void dispose_pooled_meshes(avm::ScriptObject *pool_class);
+
+    // zones: TileMapPoizone3D (the tiles of a poison/radiation zone) makes its own materials
+    // (subscribed to the shared light picker) and a mesh per tile, and its dispose() (every redraw
+    // of the zone and map change) only takes the tiles off: the materials, with their passes, and
+    // the meshes stay registered on the shared light picker and geometries. Right before its
+    // dispose() dispose the tile meshes and then their materials.
+    bool resolve_zones();
+    void dispose_zone_tiles(avm::ScriptObject *zone);
+
+    // renders: away3d's EntityCollector takes its render list entries from two pools that only
+    // grow (EntityListItemPool, RenderableListItemPool: as many entries as the busiest frame had)
+    // and freeAll() only resets their index: every entry past the last frame's keeps its entity /
+    // renderable, so up to the busiest frame's count of removed and disposed 3D objects (particle
+    // effects with their animators) stay alive. Before EntityCollector.clear(), every 15 s per
+    // collector, clear those entries (the frame fills them again when it needs them).
+    bool resolve_renders();
+    void clear_stale_entries(avm::ScriptObject *collector);
+    uint64_t clear_pool_entries(avm::ScriptObject *pool, const char *field);
+    std::unordered_map<avm::ScriptObject *, uint64_t> m_render_passes;   // collector -> last pass (ms)
 
     Darkorbit &m_game;
 };

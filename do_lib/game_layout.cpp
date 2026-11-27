@@ -336,10 +336,11 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
                     if (all)
                         fit.push_back(t);
                 }
-                if (fit.size() == 1)
+                avm::Traits *keyed = fit.size() == 1 ? (spec.statics ? class_of(fit[0]) : fit[0]) : nullptr;
+                if (keyed)
                 {
                     found[i].bindings.push_back(Binding { fit[0] });
-                    found[i].key = fingerprint(fit[0]);
+                    found[i].key = fingerprint(keyed);
                     found[i].by_name = true;
                 }
                 continue;
@@ -379,18 +380,21 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
     auto structure = [&](size_t i, std::vector<Binding> &out)
     {
         const Spec &spec = specs[i];
-        const bool statics = spec.statics && spec.kind != CLASS;
         size_t expected = 0;
         for (size_t j = 0; j < count; j++)
             expected += specs[j].kind == CLASS && specs[j].key == spec.key;
-        auto owners = spec.key ? by_key(spec.key, statics) : std::vector<avm::Traits *>();
+        auto owners = spec.key ? by_key(spec.key, spec.statics) : std::vector<avm::Traits *>();
         if (owners.empty() || owners.size() != std::max<size_t>(expected, 1))
             return false;
         for (avm::Traits *owner : owners)
         {
             Binding b;
             b.owner = owner;
-            if (spec.kind != CLASS && !member_at(owner, spec, b))
+            if (spec.kind == CLASS)
+                b.owner = spec.statics ? instance_of(owner) : owner;   // a class is its instance traits
+            else if (!member_at(owner, spec, b))
+                return false;
+            if (!b.owner)
                 return false;
             out.push_back(b);
         }
@@ -399,6 +403,7 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
 
     size_t by_key_count = 0, agree = 0;
     std::string missing, disagree;
+    std::vector<size_t> fresh;   // entries without a key yet (just added to the table)
     for (size_t i = 0; i < count; i++)
     {
         std::vector<Binding> bindings;
@@ -416,7 +421,9 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
                 same = same && match;
             }
             agree += same;
-            if (!same)
+            if (!specs[i].key)
+                fresh.push_back(i);
+            else if (!same)
                 disagree += (disagree.empty() ? "" : ", ") + spec_name(specs[i]);
             continue;
         }
@@ -459,6 +466,23 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
                    by_key_count, count, m_traits.size(), ms);
     if (!missing.empty())
         utils::log("[cleaner] layout: not found: {}\n", missing);
+    auto table_line = [&](size_t i)
+    {
+        const Spec &spec = specs[i];
+        const bool have = found[i].by_name;
+        char key[24];
+        snprintf(key, sizeof(key), "0x%016llx", static_cast<unsigned long long>(have ? found[i].key : spec.key));
+        return std::string("    { \"") + spec.cls + "\", "
+            + (spec.member ? "\"" + std::string(spec.member) + "\"" : std::string("nullptr"))
+            + ", GameLayout::" + KIND_NAMES[spec.kind] + ", " + (spec.statics ? "true" : "false") + ", " + key
+            + ", " + std::to_string(have ? found[i].position : spec.position) + " },";
+    };
+    if (!fresh.empty())
+    {
+        utils::log("[cleaner] layout: new entries, their structure (add to the table):\n");
+        for (size_t i : fresh)
+            utils::log("{}\n", table_line(i));
+    }
     if (disagree.empty())
         return;
     utils::log("[cleaner] layout: the structure table doesn't match this client for {}{}\n", disagree,
@@ -467,17 +491,7 @@ void GameLayout::resolve(avm::PoolObject *pool, avm::ScriptObject *main, const S
         return;
     utils::log("[cleaner] layout: this client's structure table:\n");
     for (size_t i = 0; i < count; i++)
-    {
-        const Spec &spec = specs[i];
-        const bool have = found[i].by_name;
-        char key[24];
-        snprintf(key, sizeof(key), "0x%016llx", static_cast<unsigned long long>(have ? found[i].key : spec.key));
-        const std::string line = std::string("    { \"") + spec.cls + "\", "
-            + (spec.member ? "\"" + std::string(spec.member) + "\"" : std::string("nullptr"))
-            + ", GameLayout::" + KIND_NAMES[spec.kind] + ", " + (spec.statics ? "true" : "false") + ", " + key
-            + ", " + std::to_string(have ? found[i].position : spec.position) + " },";
-        utils::log("{}\n", line);
-    }
+        utils::log("{}\n", table_line(i));
 }
 
 const std::vector<avm::Traits *> &GameLayout::classes(const char *name) const

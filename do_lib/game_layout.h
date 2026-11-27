@@ -29,7 +29,8 @@ public:
         const char *cls;        // the class; for a member, the class to look in (it or a base declares it)
         const char *member;     // nullptr for a class
         Kind kind;
-        bool statics;           // a static member (of the class object)
+        bool statics;           // a static member (of the class object); a class: found by its statics
+                                // (one without instance members has the structure of many others)
         uint64_t key;           // fingerprint of the declaring class (a class: its own)
         uint16_t position;      // index among the declaring class' own members of this kind
     };

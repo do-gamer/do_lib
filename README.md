@@ -186,11 +186,14 @@ game thread, using the game's own methods. At start it logs the parts it runs
 | `views` | ship 3D views stay registered on shared animation nodes |
 | `materials` | material managers never dispose their prototype material |
 | `markers` | out of range markers are never disposed |
-| `lights` | disposed multi-pass materials stay registered on the shared light picker |
+| `lights` | disposed materials stay registered on the shared light picker (x-ray materials, outline passes) |
 | `rockets` | heat seeking rocket markers are never disposed |
 | `robots` | repair robots' spark effects are never disposed |
 | `cannons` | cannon shot effects stay registered on the attacking ship and the effect views |
 | `models` | disposed 3D models and textures stay referenced by their loader's use counter |
+| `pools` | pooled rocket meshes are never disposed when the game clears its pools (map change) |
+| `zones` | poison/radiation zone tiles and their materials are never disposed |
+| `renders` | render list entries past the last frame keep removed 3D objects alive |
 
 `tooltips` and `ships` run every 15 s, the others hook the game method where the leak
 starts. If a game update changes the classes a part relies on, it logs
@@ -202,7 +205,7 @@ names (obfuscated) by structure: a fingerprint of each class that renaming doesn
 table against the client:
 
 ```
-[cleaner] layout: 90 of 90 found by name, the structure table finds 90 of them (15218 classes, 29 ms)
+[cleaner] layout: 114 of 114 found by name, the structure table finds 114 of them (15218 classes, 29 ms)
 ```
 
 When a client update changes those classes, the line names them: start once with

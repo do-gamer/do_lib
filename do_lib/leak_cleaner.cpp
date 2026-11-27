@@ -15,11 +15,14 @@ const LeakCleaner::Stats LeakCleaner::DEFAULT_STATS[PART_COUNT] = {
     { "views",     "released", "disposed ship views from shared animations" },
     { "materials", "disposed", "prototype materials of freed managers" },
     { "markers",   "disposed", "out of range markers" },
-    { "lights",    "released", "disposed x-ray materials from the light picker" },
+    { "lights",    "released", "disposed materials from the light picker" },
     { "rockets",   "disposed", "heat seeking rocket markers" },
     { "robots",    "disposed", "repair robot sparks" },
     { "cannons",   "released", "cannon shot effects (made one-shot)" },
     { "models",    "released", "disposed 3D models and textures from their use counters" },
+    { "pools",     "disposed", "pooled meshes the game dropped" },
+    { "zones",     "disposed", "zone tiles and their materials" },
+    { "renders",   "cleared",  "stale render list entries (removed 3D objects)" },
 };
 
 static inline bool is_object_atom(Atom a) { return (a & 7) == 1 && (a & ~Atom(7)) != 0; }
@@ -85,6 +88,7 @@ static avm::Multiname *public_qname(avm::PoolObject *pool, const std::string &ur
 // names (key: fingerprint of the declaring class, position: among its own members of the kind;
 // see game_layout.h). Each start with names checks the keys against the client; when a client
 // update changed these classes, run once with TANOS_DEBUG=1 and paste the table it logs here.
+// A new entry starts with key 0x0: the first start logs its key and position.
 static const GameLayout::Spec SPECS[] = {
     { "TooltipControl", nullptr, GameLayout::CLASS, false, 0x350181e4aa48e2c2, 0 },
     { "TooltipControl", "getInstance", GameLayout::METHOD, true, 0x5a278a8946349fd1, 1 },
@@ -140,6 +144,12 @@ static const GameLayout::Spec SPECS[] = {
     { "MultiPassMaterialBase", nullptr, GameLayout::CLASS, false, 0x466d34dc533eb4ec, 0 },
     { "MultiPassMaterialBase", "lightPicker", GameLayout::SETTER, false, 0x466d34dc533eb4ec, 6 },
     { "MultiPassMaterialBase", "_lightPicker", GameLayout::FIELD, false, 0xe80851e68f831e7b, 17 },
+    { "SinglePassMaterialBase", nullptr, GameLayout::CLASS, false, 0x9d81e380d13b6695, 0 },
+    { "SinglePassMaterialBase", "_screenPass", GameLayout::FIELD, false, 0x9d81e380d13b6695, 0 },
+    { "MaterialBase", "_passes", GameLayout::FIELD, false, 0xe80851e68f831e7b, 11 },
+    { "CompiledPass", "_passes", GameLayout::FIELD, false, 0x5d37dc7ff96defc0, 0 },
+    { "MaterialPassBase", "_material", GameLayout::FIELD, false, 0x84b9c4374cd2ffd4, 0 },
+    { "MaterialPassBase", "dispose", GameLayout::METHOD, false, 0x84b9c4374cd2ffd4, 0 },
     { "Rocket3D", nullptr, GameLayout::CLASS, false, 0x85ab94322ff54450, 0 },
     { "Rocket3D", "disposeThis", GameLayout::METHOD, false, 0x85ab94322ff54450, 3 },
     { "Rocket3D", "_heatSeekingMesh", GameLayout::FIELD, false, 0x85ab94322ff54450, 18 },
@@ -176,6 +186,26 @@ static const GameLayout::Spec SPECS[] = {
     { "UsageGroup", "_usage", GameLayout::FIELD, false, 0x685f203544dbce43, 3 },
     { "UsageCounter", nullptr, GameLayout::CLASS, false, 0x1dab76a3575f2bda, 0 },
     { "UsageCounter", "_target", GameLayout::FIELD, false, 0x1dab76a3575f2bda, 2 },
+    { "ObjectsPool", nullptr, GameLayout::CLASS, true, 0x7f313bec1068585e, 0 },
+    { "ObjectsPool", "clearPool", GameLayout::METHOD, true, 0x7f313bec1068585e, 2 },
+    { "ObjectsPool", "_pools", GameLayout::FIELD, true, 0x7f313bec1068585e, 1 },
+    { "TileMapPoizone3D", nullptr, GameLayout::CLASS, false, 0xb6762eabdb603b2c, 0 },
+    { "TileMapPoizone3D", "dispose", GameLayout::METHOD, false, 0xb6762eabdb603b2c, 0 },
+    { "EntityBasicMaterial", nullptr, GameLayout::CLASS, false, 0xe2b52dabea8cefb6, 0 },
+    { "ObjectContainer3D", "_children", GameLayout::FIELD, false, 0xf93ba495825dd1e2, 11 },
+    { "Mesh", "_material", GameLayout::FIELD, false, 0x8bd39542e0daadf7, 2 },
+    { "EntityCollector", nullptr, GameLayout::CLASS, false, 0x9e04b3ba2df66aba, 0 },
+    { "EntityCollector", "clear", GameLayout::METHOD, false, 0x9e04b3ba2df66aba, 1 },
+    { "EntityCollector", "_entityListItemPool", GameLayout::FIELD, false, 0x9e04b3ba2df66aba, 5 },
+    { "EntityCollector", "_renderableListItemPool", GameLayout::FIELD, false, 0x9e04b3ba2df66aba, 4 },
+    { "EntityListItemPool", nullptr, GameLayout::CLASS, false, 0x2c21d9b015ce4ddf, 0 },
+    { "EntityListItemPool", "_pool", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 0 },
+    { "EntityListItemPool", "_index", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 1 },
+    { "RenderableListItemPool", nullptr, GameLayout::CLASS, false, 0x2c21d9b015ce4ddf, 0 },
+    { "RenderableListItemPool", "_pool", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 0 },
+    { "RenderableListItemPool", "_index", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 1 },
+    { "EntityListItem", "entity", GameLayout::FIELD, false, 0x236f5a36b6d0a3d1, 0 },
+    { "RenderableListItem", "renderable", GameLayout::FIELD, false, 0x6aba08e97e920cc2, 1 },
 };
 
 // ---- common ----
@@ -197,6 +227,7 @@ void LeakCleaner::reset()
     m_tween_lite = nullptr;
     m_views = {};
     m_lights = {};
+    m_render_passes.clear();
     m_cannon_shot = nullptr;
 }
 
@@ -281,7 +312,8 @@ void LeakCleaner::tick()
                                                 &LeakCleaner::resolve_materials, &LeakCleaner::resolve_markers,
                                                 &LeakCleaner::resolve_lights, &LeakCleaner::resolve_rockets,
                                                 &LeakCleaner::resolve_robots, &LeakCleaner::resolve_cannons,
-                                                &LeakCleaner::resolve_models })
+                                                &LeakCleaner::resolve_models, &LeakCleaner::resolve_pools,
+                                                &LeakCleaner::resolve_zones, &LeakCleaner::resolve_renders })
         {
             (this->*resolve)();
             if (!installed())
@@ -958,8 +990,28 @@ bool LeakCleaner::resolve_lights()
 
     m_lights.multi_pass = ivtable->traits;
     m_lights.setter_mn = setter->name;
+
+    // single-pass materials: the multi-pass ones are cleaned without them
+    const auto &single = m_layout.classes("SinglePassMaterialBase");
+    if (single.size() == 1 && m_layout.member(single[0], "_screenPass", GameLayout::FIELD)
+        && m_layout.member(single[0], "_passes", GameLayout::FIELD))
+        m_lights.single_pass = single[0];
+    else
+        utils::log("[cleaner: lights] not cleaned: SinglePassMaterialBase: {}\n",
+                   single.size() == 1 ? "fields not found" : "class not found");
+
     hook_before(env, [this](avm::ScriptObject *material, uint32_t, uintptr_t *) { release_light_listener(material); });
     return ready(LIGHTS);
+}
+
+static bool derives_from(avm::Traits *traits, avm::Traits *base)
+{
+    for (int depth = 0; traits && base && depth < 32; traits = traits->base, depth++)
+    {
+        if (traits == base)
+            return true;
+    }
+    return false;
 }
 
 // Runs before MaterialBase.dispose() (any material)
@@ -968,15 +1020,47 @@ void LeakCleaner::release_light_listener(avm::ScriptObject *material)
     auto &f = m_lights;
     if (!active(LIGHTS) || !f.setter_mn || !ours(material))
         return;
-    bool multi_pass = false;
-    avm::Traits *t = material->vtable->traits;
-    for (int depth = 0; t && depth < 32 && !multi_pass; t = t->base, depth++)
-        multi_pass = t == f.multi_pass;
-    if (!multi_pass || !is_object_atom(read_slot(material, "_lightPicker")))
-        return;
-    // material.lightPicker = null: the (most derived) setter removes its light picker listener
-    flash_stuff::set_property(material, f.setter_mn, NULL_ATOM);
-    count(LIGHTS, 1);
+    avm::Traits *traits = material->vtable->traits;
+    if (derives_from(traits, f.multi_pass))
+    {
+        if (!is_object_atom(read_slot(material, "_lightPicker")))
+            return;
+        // material.lightPicker = null: the (most derived) setter removes its light picker listener
+        flash_stuff::set_property(material, f.setter_mn, NULL_ATOM);
+        count(LIGHTS, 1);
+    }
+    else if (derives_from(traits, f.single_pass) && dispose_method_passes(material))
+        count(LIGHTS, 1);
+}
+
+// The method passes of a single-pass material's screen pass that are not in the material's own
+// pass list (MaterialBase.dispose() disposes those): their dispose() removes the light picker
+// listener, as MaterialBase.dispose() would have done
+bool LeakCleaner::dispose_method_passes(avm::ScriptObject *material)
+{
+    avm::ScriptObject *screen = as_object(read_slot(material, "_screenPass"));
+    if (!ours(screen))
+        return false;
+    const auto passes = vector_objects(as_object(read_slot(screen, "_passes")));
+    if (passes.empty())
+        return false;
+    const auto own = vector_objects(as_object(read_slot(material, "_passes")));
+    bool any = false;
+    for (avm::ScriptObject *pass : passes)
+    {
+        // a method's pass belongs to the material that compiled it last: only this one's
+        if (!ours(pass) || std::find(own.begin(), own.end(), pass) != own.end()
+            || as_object(read_slot(pass, "_material")) != material)
+            continue;
+        if (!installed())
+            break;
+        if (uint32_t dispose = method_of(pass, "dispose"))
+        {
+            pass->call(dispose);
+            any = true;
+        }
+    }
+    return any;
 }
 
 // ---- rockets ----
@@ -1145,4 +1229,156 @@ void LeakCleaner::release_use_counter(avm::ScriptObject *loader, avm::ScriptObje
         count(MODELS, 1);
         return;
     }
+}
+
+// ---- pools ----
+
+bool LeakCleaner::resolve_pools()
+{
+    const char *why = nullptr;
+    avm::ScriptObject *cls = class_object("ObjectsPool", &why);
+    if (!cls)
+        return disable(POOLS, why);
+    if (!slot_name(cls, "_pools"))
+        return disable(POOLS, "ObjectsPool._pools not found");
+    avm::MethodEnv *env = hookable(cls->vtable, "clearPool", &why);   // static
+    if (!env)
+        return disable(POOLS, why);
+    hook_before(env, [this](avm::ScriptObject *pool_class, uint32_t, uintptr_t *) { dispose_pooled_meshes(pool_class); });
+    return ready(POOLS);
+}
+
+// Runs before ObjectsPool.clearPool(): what its disposeObject() does for a mesh (unregister it
+// from its geometry and material), for the meshes clearPool() would only drop
+void LeakCleaner::dispose_pooled_meshes(avm::ScriptObject *pool_class)
+{
+    if (!active(POOLS) || !ours(pool_class))
+        return;
+    std::vector<avm::ScriptObject *> pools;
+    if (!dictionary_values(as_object(read_slot(pool_class, "_pools")), pools))
+        return;
+    std::vector<avm::ScriptObject *> meshes;
+    for (avm::ScriptObject *pool : pools)
+    {
+        for (avm::ScriptObject *item : vector_objects(pool))
+        {
+            if (ours(item) && is_class(item, "Mesh"))   // exactly Mesh: not IDisposable, not ParticleGroup
+                meshes.push_back(item);
+        }
+    }
+    // the pools keep them alive until clearPool() empties them, after us
+    for (avm::ScriptObject *mesh : meshes)
+    {
+        if (!installed())
+            return;
+        if (uint32_t dispose = method_of(mesh, "dispose"))
+        {
+            mesh->call(dispose);
+            count(POOLS, 1);
+        }
+    }
+}
+
+// ---- zones ----
+
+bool LeakCleaner::resolve_zones()
+{
+    return hook_classes(ZONES, { { "TileMapPoizone3D", "dispose" } }, {},
+                        [this](avm::ScriptObject *zone, uint32_t, uintptr_t *) { dispose_zone_tiles(zone); });
+}
+
+// Runs before TileMapPoizone3D.dispose(): its children are containers of tile meshes (clones on
+// the zone geometries) whose materials the zone made itself (EntityBasicMaterial, one per texture).
+// Mesh.dispose() takes a tile off and unregisters it, then each material's own dispose() leaves
+// the light picker and Settings3D (textures stay: the texture loader owns them).
+void LeakCleaner::dispose_zone_tiles(avm::ScriptObject *zone)
+{
+    if (!active(ZONES) || !ours(zone))
+        return;
+    std::vector<avm::ScriptObject *> meshes, materials;
+    for (avm::ScriptObject *container : vector_objects(as_object(read_slot(zone, "_children"))))
+    {
+        if (!ours(container))
+            continue;
+        for (avm::ScriptObject *tile : vector_objects(as_object(read_slot(container, "_children"))))
+        {
+            if (!ours(tile) || !is_class(tile, "Mesh"))
+                continue;
+            meshes.push_back(tile);
+            avm::ScriptObject *material = as_object(read_slot(tile, "_material"));
+            if (ours(material) && is_class(material, "EntityBasicMaterial")
+                && std::find(materials.begin(), materials.end(), material) == materials.end())
+                materials.push_back(material);
+        }
+    }
+    // the zone's display list keeps the tiles (and they their materials) alive until we're done:
+    // collect first, then the meshes (Mesh.dispose takes them off), then the materials
+    for (avm::ScriptObject *mesh : meshes)
+    {
+        if (!installed())
+            return;
+        if (uint32_t dispose = method_of(mesh, "dispose"))
+            mesh->call(dispose);
+    }
+    for (avm::ScriptObject *material : materials)
+    {
+        if (!installed())
+            return;
+        if (uint32_t dispose = method_of(material, "dispose"))
+            material->call(dispose);
+    }
+    count(ZONES, meshes.size() + materials.size());
+}
+
+// ---- renders ----
+
+bool LeakCleaner::resolve_renders()
+{
+    const char *why = nullptr;
+    avm::VTable *ivtable = instance_vtable("EntityCollector", &why);
+    if (!ivtable)
+        return disable(RENDERS, why);
+    if (!m_layout.member(ivtable->traits, "_entityListItemPool", GameLayout::FIELD)
+        || !m_layout.member(ivtable->traits, "_renderableListItemPool", GameLayout::FIELD))
+        return disable(RENDERS, "EntityCollector fields not found");
+    avm::MethodEnv *env = hookable(ivtable, "clear", &why);
+    if (!env)
+        return disable(RENDERS, why);
+    hook_before(env, [this](avm::ScriptObject *collector, uint32_t, uintptr_t *) { clear_stale_entries(collector); });
+    return ready(RENDERS);
+}
+
+// Runs before EntityCollector.clear() (each frame, each collector)
+void LeakCleaner::clear_stale_entries(avm::ScriptObject *collector)
+{
+    if (!active(RENDERS) || !ours(collector))
+        return;
+    const uint64_t now = flash_ipc::now_ms();
+    if (m_render_passes.size() > 64)   // collectors live as long as their view: a few
+        m_render_passes.clear();
+    uint64_t &last = m_render_passes[collector];
+    if (now - last < 15000)
+        return;
+    last = now;
+    count(RENDERS, clear_pool_entries(as_object(read_slot(collector, "_entityListItemPool")), "entity")
+                       + clear_pool_entries(as_object(read_slot(collector, "_renderableListItemPool")), "renderable"));
+}
+
+// The pool's entries past the last frame's (_index, until clear() resets it): their old object
+uint64_t LeakCleaner::clear_pool_entries(avm::ScriptObject *pool, const char *field)
+{
+    if (!ours(pool))
+        return 0;
+    const Atom index = read_slot(pool, "_index");
+    if ((index & 7) != 6)   // an int
+        return 0;
+    const intptr_t used = intptr_t(index) >> 3;
+    const auto entries = vector_objects(as_object(read_slot(pool, "_pool")));   // never has holes
+    uint64_t cleared = 0;
+    for (size_t i = used > 0 ? size_t(used) : 0; i < entries.size(); i++)
+    {
+        if (ours(entries[i]) && is_object_atom(read_slot(entries[i], field)) && write_slot(entries[i], field, NULL_ATOM))
+            cleared++;
+    }
+    return cleared;
 }
