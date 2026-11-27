@@ -168,22 +168,46 @@ Logs are written to `logs/<start time>_TanosApi.log` (bot client, browser and fl
 process share one file). Set `TANOS_DEBUG=1` in the bot's environment to also log flash
 hook activity (JIT verifications, GC chunk frees).
 
-do_lib works around memory leaks of the game client, on the game thread, using the game's
-own methods. Each cleaner logs `[<name>] cleaner ready` at start, then what it released:
+do_lib works around memory leaks of the game client (`do_lib/leak_cleaner.cpp`), on the
+game thread, using the game's own methods. At start it logs the parts it runs
+(`[cleaner] ready: tooltips, ships, ...`), then once a minute what each part released:
 
-| Log tag | Leak |
+```
+[cleaner: tweens] unlinked 4035 finished tweens (449958 in total)
+[cleaner: rockets] disposed 20 heat seeking rocket markers (1394 in total)
+[cleaner] GC heap used 700 MB
+```
+
+| Part | Leak |
 |---|---|
-| `[tooltip]` | tooltips of discarded action bar elements |
-| `[ships]` | dead ships kept alive by their HUD's lock listener |
-| `[tweens]` | finished GreenSock tweens keep their old list links (chains of dead ships) |
-| `[views]` | ship 3D views stay registered on shared animation nodes |
-| `[materials]` | material managers never dispose their prototype material |
-| `[markers]` | out of range markers are never disposed |
-| `[lights]` | disposed multi-pass materials stay registered on the shared light picker |
+| `tooltips` | tooltips of discarded action bar elements |
+| `ships` | dead ships kept alive by their HUD's lock listener |
+| `tweens` | finished GreenSock tweens keep their old list links (chains of dead ships) |
+| `views` | ship 3D views stay registered on shared animation nodes |
+| `materials` | material managers never dispose their prototype material |
+| `markers` | out of range markers are never disposed |
+| `lights` | disposed multi-pass materials stay registered on the shared light picker |
+| `rockets` | heat seeking rocket markers are never disposed |
+| `robots` | repair robots' spark effects are never disposed |
+| `cannons` | cannon shot effects stay registered on the attacking ship and the effect views |
+| `models` | disposed 3D models and textures stay referenced by their loader's use counter |
 
-`[tooltip]` and `[ships]` run every 15 s, the others hook the game method where the leak
-starts. If a game update changes the classes they rely on, they log
-`cleaner disabled: <reason>` and stay off.
+`tooltips` and `ships` run every 15 s, the others hook the game method where the leak
+starts. If a game update changes the classes a part relies on, it logs
+`[cleaner: <part>] disabled: <reason>` and stays off.
+
+The game classes and members the cleaner uses are found by name, or on a client without the
+names (obfuscated) by structure: a fingerprint of each class that renaming doesn't change
+(`do_lib/game_layout.cpp`, table `SPECS` in `do_lib/leak_cleaner.cpp`). Each start checks the
+table against the client:
+
+```
+[cleaner] layout: 90 of 90 found by name, the structure table finds 90 of them (15218 classes, 29 ms)
+```
+
+When a client update changes those classes, the line names them: start once with
+`TANOS_DEBUG=1` and paste the table it logs into `SPECS`. `TANOS_LAYOUT_BY_STRUCTURE=1` ignores
+the names (tests the structure lookup).
 
 Leftover shared memory segments from older versions (killed flash processes) can be
 listed with `ipcs -m` (1024 byte segments with `nattch 0`) and removed with `ipcrm -m <id>`.

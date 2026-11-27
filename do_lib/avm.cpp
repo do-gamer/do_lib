@@ -350,3 +350,8 @@ void avm::clear_traits_cache()
     g_cache_generation.fetch_add(1, std::memory_order_relaxed);
 }
 
+uint32_t avm::cache_generation()
+{
+    return g_cache_generation.load(std::memory_order_relaxed);
+}
+
