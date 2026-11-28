@@ -39,7 +39,7 @@ private:
     enum Part
     {
         TOOLTIPS, SHIPS, TWEENS, VIEWS, MATERIALS, MARKERS, LIGHTS, ROCKETS, ROBOTS, CANNONS, MODELS, POOLS, ZONES,
-        RENDERS, PART_COUNT
+        RENDERS, COUNTDOWNS, PART_COUNT
     };
 
     struct Stats
@@ -73,7 +73,8 @@ private:
 
     // the hookable MethodEnv of a method in this vtable (a class' for statics, the instance
     // vtable otherwise): nullptr and *why if not found or already hooked
-    avm::MethodEnv *hookable(avm::VTable *vtable, const char *method, const char **why);
+    avm::MethodEnv *hookable(avm::VTable *vtable, const char *method, const char **why,
+                             GameLayout::Kind kind = GameLayout::METHOD);
     // the class object / instance vtable of a game class (see m_layout): nullptr and *why if not found
     avm::ScriptObject *class_object(const char *class_name, const char **why);
     avm::VTable *instance_vtable(const char *class_name, const char **why);
@@ -121,16 +122,27 @@ private:
     // tooltips: the game never unregisters the tooltips of action bar elements it throws away,
     // the TooltipControl singleton keeps them (and their whole display tree) forever. Every 15 s
     // remove the tooltips of objects that left the stage: each hook's own suicide(), then the
-    // list without them (what removeToolTip does, in one pass over the list).
+    // list without them (what removeToolTip does, in one pass over the list). The same for the
+    // sticky tooltips (help texts) of the video windows (story and wave messages): every window
+    // registers one on itself, and the windows the game throws away keep theirs. Only video
+    // windows there: the help texts of the other windows must survive while they are closed.
+    struct TooltipList
+    {
+        const char *field;                        // TooltipControl.<field>: an Array of hooks
+        const char *hook_class;
+        avm::Multiname *list_mn = nullptr;
+        uint32_t get_target_index = 0;            // vtable index of <hook_class>.getTargetObject
+        uint32_t suicide_index = 0;               // vtable index of <hook_class>.suicide
+        avm::Traits *only_targets = nullptr;      // prune only targets of this class (or subclasses)
+    };
     bool resolve_tooltips();
     void prune_tooltips();
+    const char *prune_tooltip_list(TooltipList &l);
     struct
     {
         avm::ScriptObject *control = nullptr;     // TooltipControl._instance (lives in a static)
-        avm::Multiname *list_mn = nullptr;        // TooltipControl.toolTipsList
-        uint32_t get_target_index = 0;            // vtable index of ToolTipHook.getTargetObject
         avm::Multiname *stage_mn = nullptr;       // public DisplayObject.stage
-        uint32_t suicide_index = 0;               // vtable index of ToolTipHook.suicide
+        TooltipList lists[2] = { { "toolTipsList", "ToolTipHook" }, { "stickyToolTipsList", "StickyToolTipHook" } };
     } m_tooltips;
 
     // ships: ShipUpgradeDisplay (upgrade icons in a ship's HUD) subscribes to the map's
@@ -264,6 +276,16 @@ private:
     void clear_stale_entries(avm::ScriptObject *collector);
     uint64_t clear_pool_entries(avm::ScriptObject *pool, uint16_t position);
     std::unordered_map<avm::ScriptObject *, uint64_t> m_render_passes;   // collector -> last pass (ms)
+
+    // countdowns: a BindableCountDown ticks on its own setInterval until it reaches zero. The
+    // assembly window's recipes get a new type and state on every update: the old temporary
+    // type (AssemblyTemporaryType, days left) is dropped with its countdown still running, and
+    // AssemblyTimerState.dispose() calls timer.changed.removeAll(), which also removes the
+    // countdown's own handler that stops the interval at zero, so it never stops. Each running
+    // interval keeps its countdown alive and fires every second. Stop() the countdown before the
+    // recipe's type is replaced, before a recipe is removed and before AssemblyTimerState.dispose().
+    bool resolve_countdowns();
+    void stop_countdown(avm::ScriptObject *owner, const char *field);
 
     Darkorbit &m_game;
 };

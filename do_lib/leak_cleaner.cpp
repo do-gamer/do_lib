@@ -23,6 +23,7 @@ const LeakCleaner::Stats LeakCleaner::DEFAULT_STATS[PART_COUNT] = {
     { "pools",     "disposed", "pooled meshes the game dropped" },
     { "zones",     "disposed", "zone tiles and their materials" },
     { "renders",   "cleared",  "stale render list entries (removed 3D objects)" },
+    { "countdowns", "stopped", "countdowns of replaced assembly recipes" },
 };
 
 static inline bool is_object_atom(Atom a) { return (a & 7) == 1 && (a & ~Atom(7)) != 0; }
@@ -71,6 +72,16 @@ static uint32_t declared_method_index(avm::VTable *vtable, const GameLayout::Bin
     return 0;
 }
 
+static bool derives_from(avm::Traits *traits, avm::Traits *base)
+{
+    for (int depth = 0; traits && base && depth < 32; traits = traits->base, depth++)
+    {
+        if (traits == base)
+            return true;
+    }
+    return false;
+}
+
 // QName (flag 0x02 only: no ATTR, RTNS, RTNAME, NSSET) in the public namespace of a package
 static avm::Multiname *public_qname(avm::PoolObject *pool, const std::string &uri, const std::string &name)
 {
@@ -96,6 +107,11 @@ static const GameLayout::Spec SPECS[] = {
     { "ToolTipHook", nullptr, GameLayout::CLASS, false, 0xc58eff1d2de7d2d9, 0 },
     { "ToolTipHook", "getTargetObject", GameLayout::METHOD, false, 0xc58eff1d2de7d2d9, 9 },
     { "ToolTipHook", "suicide", GameLayout::METHOD, false, 0xc58eff1d2de7d2d9, 10 },
+    { "TooltipControl", "stickyToolTipsList", GameLayout::FIELD, false, 0x350181e4aa48e2c2, 1 },
+    { "StickyToolTipHook", nullptr, GameLayout::CLASS, false, 0x17e10e877d73ed63, 0 },
+    { "StickyToolTipHook", "getTargetObject", GameLayout::METHOD, false, 0x17e10e877d73ed63, 4 },
+    { "StickyToolTipHook", "suicide", GameLayout::METHOD, false, 0x17e10e877d73ed63, 5 },
+    { "VideoWindow", nullptr, GameLayout::CLASS, false, 0xa0b2eaa0955309f1, 0 },
     { "ScreenManager", nullptr, GameLayout::CLASS, false, 0xf6b0d1fc950a1848, 0 },
     { "ScreenManager", "_map", GameLayout::FIELD, false, 0xf6b0d1fc950a1848, 35 },
     { "Map", nullptr, GameLayout::CLASS, false, 0xd2d589e467c41eb6, 0 },
@@ -204,6 +220,18 @@ static const GameLayout::Spec SPECS[] = {
     { "RenderableListItemPool", nullptr, GameLayout::CLASS, false, 0x2c21d9b015ce4ddf, 0 },
     { "RenderableListItemPool", "_pool", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 0 },
     { "RenderableListItemPool", "_index", GameLayout::FIELD, false, 0x2c21d9b015ce4ddf, 1 },
+    { "AssemblyRecipeModel", nullptr, GameLayout::CLASS, false, 0x6cb76e19e8807870, 0 },
+    { "AssemblyRecipeModel", "type", GameLayout::SETTER, false, 0x6cb76e19e8807870, 1 },
+    { "AssemblyRecipeModel", "_type", GameLayout::FIELD, false, 0x6cb76e19e8807870, 4 },
+    { "AssemblyRecipeModel", "_state", GameLayout::FIELD, false, 0x6cb76e19e8807870, 3 },
+    { "AssemblyModel", nullptr, GameLayout::CLASS, false, 0xfb0c52d8a6fbc574, 0 },
+    { "AssemblyModel", "internalRemove", GameLayout::METHOD, false, 0xfb0c52d8a6fbc574, 7 },
+    { "AssemblyTemporaryType", "time", GameLayout::FIELD, false, 0x692f7aa8562d0f25, 0 },
+    { "AssemblyTimerState", nullptr, GameLayout::CLASS, false, 0x7896755cc0bd7dcc, 0 },
+    { "AssemblyTimerState", "dispose", GameLayout::METHOD, false, 0x7896755cc0bd7dcc, 0 },
+    { "AssemblyTimerState", "timer", GameLayout::FIELD, false, 0x7896755cc0bd7dcc, 0 },
+    { "BindableCountDown", nullptr, GameLayout::CLASS, false, 0xc04c284c69280fc3, 0 },
+    { "BindableCountDown", "stop", GameLayout::METHOD, false, 0xc04c284c69280fc3, 3 },
 };
 
 // ---- common ----
@@ -311,7 +339,8 @@ void LeakCleaner::tick()
                                                 &LeakCleaner::resolve_lights, &LeakCleaner::resolve_rockets,
                                                 &LeakCleaner::resolve_robots, &LeakCleaner::resolve_cannons,
                                                 &LeakCleaner::resolve_models, &LeakCleaner::resolve_pools,
-                                                &LeakCleaner::resolve_zones, &LeakCleaner::resolve_renders })
+                                                &LeakCleaner::resolve_zones, &LeakCleaner::resolve_renders,
+                                                &LeakCleaner::resolve_countdowns })
         {
             (this->*resolve)();
             if (!installed())
@@ -329,9 +358,9 @@ void LeakCleaner::tick()
     log_released(now);
 }
 
-avm::MethodEnv *LeakCleaner::hookable(avm::VTable *vtable, const char *method, const char **why)
+avm::MethodEnv *LeakCleaner::hookable(avm::VTable *vtable, const char *method, const char **why, GameLayout::Kind kind)
 {
-    const GameLayout::Binding *b = vtable ? m_layout.member(vtable->traits, method, GameLayout::METHOD) : nullptr;
+    const GameLayout::Binding *b = vtable ? m_layout.member(vtable->traits, method, kind) : nullptr;
     uint32_t index = b ? declared_method_index(vtable, *b) : 0;
     avm::MethodEnv *env = index ? vtable->methods[index] : nullptr;
     if (!env || !env->method_info)
@@ -603,9 +632,17 @@ bool LeakCleaner::resolve_tooltips()
     if (!control || !is_class(control, "TooltipControl"))
         return disable(TOOLTIPS, "unexpected TooltipControl instance");
 
-    avm::Multiname *list_mn = slot_name(control, "toolTipsList");
-    if (!list_mn)
+    TooltipList &tooltips = m_tooltips.lists[0];
+    tooltips.list_mn = slot_name(control, tooltips.field);
+    if (!tooltips.list_mn)
         return disable(TOOLTIPS, "TooltipControl.toolTipsList not found");
+    // sticky tooltips: video windows only (the tooltips are cleaned without them)
+    TooltipList &sticky = m_tooltips.lists[1];
+    const auto &video = m_layout.classes("VideoWindow");
+    sticky.list_mn = video.size() == 1 && !m_layout.classes(sticky.hook_class).empty() ? slot_name(control, sticky.field) : nullptr;
+    sticky.only_targets = sticky.list_mn ? video[0] : nullptr;
+    if (!sticky.list_mn)
+        utils::log("[cleaner: tooltips] not cleaned: sticky tooltips of video windows (classes not found)\n");
 
     // DisplayObject.stage, read only on hook targets (InteractiveObjects, never anything else)
     avm::Multiname *stage_mn = public_qname(m_game.m_const_pool, "", "stage");
@@ -613,7 +650,6 @@ bool LeakCleaner::resolve_tooltips()
         return disable(TOOLTIPS, "public 'stage' name not found");
 
     m_tooltips.control = control;
-    m_tooltips.list_mn = list_mn;
     m_tooltips.stage_mn = stage_mn;
     return ready(TOOLTIPS);
 }
@@ -625,17 +661,33 @@ void LeakCleaner::prune_tooltips()
         return;
     if (!f.control && !resolve_tooltips())
         return;
-
-    Atom list_atom = flash_stuff::get_property(f.control, f.list_mn);
-    if (!is_object_atom(list_atom))
+    if (const char *why = prune_tooltip_list(f.lists[0]))
+    {
+        disable(TOOLTIPS, why);
         return;
+    }
+    TooltipList &sticky = f.lists[1];
+    if (!sticky.list_mn || !installed())
+        return;
+    if (const char *why = prune_tooltip_list(sticky))
+    {
+        utils::log("[cleaner: tooltips] not cleaned: sticky tooltips of video windows ({})\n", why);
+        sticky.list_mn = nullptr;
+    }
+}
+
+// One pass over a list of hooks (an Array field of TooltipControl). nullptr, or why the list
+// can't be cleaned.
+const char *LeakCleaner::prune_tooltip_list(TooltipList &l)
+{
+    auto &f = m_tooltips;
+    Atom list_atom = flash_stuff::get_property(f.control, l.list_mn);
+    if (!is_object_atom(list_atom))
+        return nullptr;
     auto *list = reinterpret_cast<avm::Array *>(avm::remove_kind(list_atom));
     if (!is_class(list, "Array") || !list->data
         || avm::get_block_header(list->data)->gc != m_game.m_gc)  // the storage must be a block of our GC
-    {
-        disable(TOOLTIPS, "toolTipsList isn't an Array");
-        return;
-    }
+        return "the list isn't an Array";
     // dense storage: ListData { vtable, uint32 len, ..., Atom entries[] }
     const uint32_t dense_len = *reinterpret_cast<uint32_t *>(reinterpret_cast<uintptr_t>(list->data) + 8);
     const uint32_t listed = std::min(list->size, dense_len);
@@ -649,21 +701,15 @@ void LeakCleaner::prune_tooltips()
         const Atom hook_atom = (*list)[i];
         avm::ScriptObject *hook = as_object(hook_atom);
         avm::ScriptObject *target = nullptr;
-        if (hook && is_class(hook, "ToolTipHook"))   // e.g. a subclass: leave it alone
+        if (hook && is_class(hook, l.hook_class))   // e.g. a subclass: leave it alone
         {
-            if (!f.get_target_index && !(f.get_target_index = method_of(hook, "getTargetObject")))
-            {
-                disable(TOOLTIPS, "ToolTipHook.getTargetObject not found");
-                return;
-            }
-            if (!f.suicide_index && !(f.suicide_index = method_of(hook, "suicide")))
-            {
-                disable(TOOLTIPS, "ToolTipHook.suicide not found");
-                return;
-            }
-            target = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(hook->call(f.get_target_index)));
+            if (!l.get_target_index && !(l.get_target_index = method_of(hook, "getTargetObject")))
+                return "getTargetObject not found";
+            if (!l.suicide_index && !(l.suicide_index = method_of(hook, "suicide")))
+                return "suicide not found";
+            target = avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(hook->call(l.get_target_index)));
         }
-        if (target)
+        if (target && (!l.only_targets || derives_from(target->vtable->traits, l.only_targets)))
         {
             Atom stage = flash_stuff::get_property(target, f.stage_mn);
             if (stage == NULL_ATOM)
@@ -672,15 +718,12 @@ void LeakCleaner::prune_tooltips()
                 continue;
             }
             if (!is_object_atom(stage) || !is_class(as_object(stage), "Stage"))
-            {
-                disable(TOOLTIPS, "'stage' didn't read a Stage");
-                return;
-            }
+                return "'stage' didn't read a Stage";
         }
         keep.push_back(hook_atom);
     }
     if (stale.empty())
-        return;
+        return nullptr;
 
     // What TooltipControl.removeToolTip(target) does for each, without its walk of the whole list
     // per target (thousands of hooks after the GUI is rebuilt): the hook's own suicide() (removes
@@ -689,18 +732,19 @@ void LeakCleaner::prune_tooltips()
     // setproperty (write barriers and reference counts included).
     for (avm::ScriptObject *hook : stale)
     {
-        hook->call(f.suicide_index);
+        hook->call(l.suicide_index);
         if (!installed())
-            return;
+            return nullptr;
     }
-    if (flash_stuff::get_property(f.control, f.list_mn) != list_atom || list->size != listed)
-        return; // the game changed the list meanwhile: the next pass finds these hooks again
+    if (flash_stuff::get_property(f.control, l.list_mn) != list_atom || list->size != listed)
+        return nullptr; // the game changed the list meanwhile: the next pass finds these hooks again
     auto *fresh = reinterpret_cast<avm::ScriptObject *>(
-        flash_stuff::newarray(stale.front()->vtable->methods[f.get_target_index], uint32_t(keep.size()), keep.data()));
+        flash_stuff::newarray(stale.front()->vtable->methods[l.get_target_index], uint32_t(keep.size()), keep.data()));
     if (!ours(fresh) || !is_class(fresh, "Array"))
-        return;
-    flash_stuff::set_property(f.control, f.list_mn, reinterpret_cast<Atom>(fresh) | 1);
+        return nullptr;
+    flash_stuff::set_property(f.control, l.list_mn, reinterpret_cast<Atom>(fresh) | 1);
     count(TOOLTIPS, stale.size());
+    return nullptr;
 }
 
 // ---- ships ----
@@ -1014,16 +1058,6 @@ bool LeakCleaner::resolve_lights()
 
     hook_before(env, [this](avm::ScriptObject *material, uint32_t, uintptr_t *) { release_light_listener(material); });
     return ready(LIGHTS);
-}
-
-static bool derives_from(avm::Traits *traits, avm::Traits *base)
-{
-    for (int depth = 0; traits && base && depth < 32; traits = traits->base, depth++)
-    {
-        if (traits == base)
-            return true;
-    }
-    return false;
 }
 
 // Runs before MaterialBase.dispose() (any material)
@@ -1408,4 +1442,65 @@ uint64_t LeakCleaner::clear_pool_entries(avm::ScriptObject *pool, uint16_t posit
         }
     }
     return cleared;
+}
+
+// ---- countdowns ----
+
+bool LeakCleaner::resolve_countdowns()
+{
+    const char *why = nullptr;
+    avm::VTable *recipe = instance_vtable("AssemblyRecipeModel", &why);
+    if (!recipe)
+        return disable(COUNTDOWNS, why);
+    if (!m_layout.member(recipe->traits, "_type", GameLayout::FIELD) || !m_layout.member(recipe->traits, "_state", GameLayout::FIELD))
+        return disable(COUNTDOWNS, "AssemblyRecipeModel fields not found");
+    avm::MethodEnv *set_type = hookable(recipe, "type", &why, GameLayout::SETTER);
+    if (!set_type)
+        return disable(COUNTDOWNS, why);
+    avm::VTable *model = instance_vtable("AssemblyModel", &why);
+    avm::MethodEnv *remove = model ? hookable(model, "internalRemove", &why) : nullptr;   // private
+    if (!remove)
+        return disable(COUNTDOWNS, why);
+    avm::VTable *timer_state = instance_vtable("AssemblyTimerState", &why);
+    avm::MethodEnv *dispose = timer_state ? hookable(timer_state, "dispose", &why) : nullptr;
+    if (!dispose)
+        return disable(COUNTDOWNS, why);
+
+    // recipe.type = next: the old type's countdown
+    hook_before(set_type, [this](avm::ScriptObject *recipe, uint32_t argc, uintptr_t *argv)
+    {
+        if (!active(COUNTDOWNS) || !ours(recipe) || argc < 1)
+            return;
+        // arguments come as the method takes them: an object is a pointer, not an atom
+        avm::ScriptObject *old = as_object(read_slot(recipe, "_type"));
+        if (old && old != avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[1])))
+            stop_countdown(old, "time");
+    });
+    // internalRemove(recipe): the recipe leaves the model, its type's and state's countdowns
+    hook_before(remove, [this](avm::ScriptObject *, uint32_t argc, uintptr_t *argv)
+    {
+        avm::ScriptObject *recipe = argc >= 1 ? avm::remove_kind(reinterpret_cast<avm::ScriptObject *>(argv[1])) : nullptr;
+        if (!active(COUNTDOWNS) || !ours(recipe))
+            return;
+        stop_countdown(as_object(read_slot(recipe, "_type")), "time");
+        stop_countdown(as_object(read_slot(recipe, "_state")), "timer");
+    });
+    hook_before(dispose, [this](avm::ScriptObject *state, uint32_t, uintptr_t *) { stop_countdown(state, "timer"); });
+    return ready(COUNTDOWNS);
+}
+
+// owner.<field>.stop() (a BindableCountDown): clears its interval. Owners without the field
+// (other recipe types and states) have none to stop.
+void LeakCleaner::stop_countdown(avm::ScriptObject *owner, const char *field)
+{
+    if (!active(COUNTDOWNS) || !ours(owner))
+        return;
+    avm::ScriptObject *countdown = as_object(read_slot(owner, field));
+    if (!ours(countdown) || !is_class(countdown, "BindableCountDown"))
+        return;
+    if (uint32_t stop = method_of(countdown, "stop"))
+    {
+        countdown->call(stop);
+        count(COUNTDOWNS, 1);
+    }
 }

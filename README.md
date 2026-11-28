@@ -180,7 +180,7 @@ game thread, using the game's own methods. At start it logs the parts it runs
 
 | Part | Leak |
 |---|---|
-| `tooltips` | tooltips of discarded action bar elements |
+| `tooltips` | tooltips of discarded action bar elements, help texts of discarded video windows |
 | `ships` | dead ships kept alive by their HUD's lock listener |
 | `tweens` | finished GreenSock tweens keep their old list links (chains of dead ships) |
 | `views` | ship 3D views stay registered on shared animation nodes |
@@ -194,6 +194,7 @@ game thread, using the game's own methods. At start it logs the parts it runs
 | `pools` | pooled rocket meshes are never disposed when the game clears its pools (map change) |
 | `zones` | poison/radiation zone tiles and their materials are never disposed |
 | `renders` | render list entries past the last frame keep removed 3D objects alive |
+| `countdowns` | countdowns of replaced assembly recipes keep running (and alive) forever |
 
 `tooltips` and `ships` run every 15 s, the others hook the game method where the leak
 starts. If a game update changes the classes a part relies on, it logs
