@@ -1,4 +1,5 @@
 #include "darkorbit.h"
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <iostream>
@@ -6,7 +7,6 @@
 
 #include "disassembler.h"
 #include "memory.h"
-#include "offsets.h"
 
 
 #define TAG_NUMBER(val) (uintptr_t(val) << 3) | 6
@@ -256,6 +256,12 @@ void Darkorbit::handle_async_calls(avm::MethodEnv *env, uint32_t argc, uintptr_t
 {
     m_ipc.Heartbeat();
 
+    // the game's own leaks (leak_cleaner.h). They call into the VM: a collection may free
+    // hooked code meanwhile (free_chunk -> uninstall)
+    m_cleaner.tick();
+    if (!m_installed)
+        return;
+
     // Run the tasks outside the lock: they call into the VM, which may re-enter us
     // (GC -> free_chunk -> uninstall) and the ipc thread must be able to queue meanwhile.
     std::vector<std::packaged_task<uintptr_t()>> tasks;
@@ -487,6 +493,8 @@ bool Darkorbit::install(uintptr_t main_app_address)
     mouse_click(0, 0, 1); // Mouse click to initialize the click param for flash IPC
 
     m_main            = memory::read<avm::ScriptObject *>(main_app_address + 0x540);
+    m_gc              = avm::get_block_header(m_main)->gc;
+    m_cleaner.reset();                // a new game: resolve the leak cleaner's parts again
     m_screen_manager  = m_main->get_at<avm::ScriptObject *>(0x1f8);
     m_gui_manager     = m_main->get_at<avm::ScriptObject *>(0x200);
     m_event_manager   = m_screen_manager->get_at<avm::ScriptObject *>(0xc8);

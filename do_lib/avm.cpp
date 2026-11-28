@@ -217,27 +217,43 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
         }
     }
 
-    BinaryStream s { traits_pos };
     custom_pool = custom_pool ? custom_pool : pool;
     MyTraits traits;
+    if (!traits_pos)
+        return traits;
+    BinaryStream s { traits_pos };
 
-    /* auto qname = */ s.read_u32();
-    /* auto qname = */ s.read_u32();
-
-    auto flags = s.read_u32();
-
-    if ((flags & 0x8) != 0)
+    // traits_pos points at the ABC record that declares these traits: class objects ("Foo$")
+    // and scripts have a shorter header than instances (see MethodInfo::name())
+    switch (pos_type)
     {
-        s.read_u32();
-    }
+        case 0: // instance_info
+        {
+            /* name */ s.read_u32();
+            /* super_name */ s.read_u32();
 
-    auto interface_count = s.read_u32();
-    for (uint32_t i = 0; i < interface_count; i++)
-    {
-        s.read_u32();
-    }
+            auto flags = s.read_u32();
+            if ((flags & 0x8) != 0)
+            {
+                /* protected_ns */ s.read_u32();
+            }
 
-    /* auto iinit = */ s.read_u32();
+            auto interface_count = s.read_u32();
+            for (uint32_t i = 0; i < interface_count; i++)
+            {
+                s.read_u32();
+            }
+
+            /* iinit */ s.read_u32();
+            break;
+        }
+        case 1: // class_info
+        case 2: // script_info
+            /* cinit/init */ s.read_u32();
+            break;
+        default:
+            return traits; // e.g. activation / catch scopes: nothing we parse
+    }
 
     uint32_t trait_count = s.read_u32();
     traits.traits.reserve(trait_count); // avoid repeated reallocations
@@ -332,5 +348,10 @@ avm::MyTraits avm::Traits::parse_traits(avm::PoolObject *custom_pool)
 void avm::clear_traits_cache()
 {
     g_cache_generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint32_t avm::cache_generation()
+{
+    return g_cache_generation.load(std::memory_order_relaxed);
 }
 

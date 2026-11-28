@@ -102,8 +102,14 @@ namespace avm
 
     struct GC
     {
-        uint8_t pad[0x2278];
-        uintptr_t *zct_bottom;
+        // the zero count table (MMgc ZCT, at +0x2258): reference counted objects whose count
+        // dropped to 0, freed at the next reap unless the stack refers to them. Blocks of 0x1000
+        // bytes; an object's ZCT index counts across all blocks (blocktable[index >> 9][index & 511]).
+        uint8_t pad[0x2260];
+        uintptr_t **zct_blocktable;
+        uintptr_t **zct_blocktop;       // next free blocktable entry
+        uint8_t pad1[0x2278 - 0x2270];
+        uintptr_t *zct_bottom;          // first entry of the current (last) block only
         uintptr_t *zct_top;
         uintptr_t *zct_max;
     };
@@ -614,6 +620,8 @@ namespace avm
 
     /* Clear cached parsed traits (used to invalidate cached entries when VM memory is freed) */
     void clear_traits_cache();
+    /* Changes whenever VM memory is freed: caches keyed by VM pointers must be dropped then */
+    uint32_t cache_generation();
 
     struct VTable
     {

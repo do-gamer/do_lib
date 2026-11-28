@@ -8,6 +8,8 @@ add_library(${PROJECT_NAME} SHARED
     ipc.cpp
     ipc_handler.cpp
     darkorbit.cpp
+    leak_cleaner.cpp
+    game_layout.cpp
     memory.cpp
     avm.cpp
     singleton.cpp

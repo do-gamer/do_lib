@@ -8,6 +8,7 @@
 #include <future>
 #include <mutex>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -16,6 +17,7 @@
 #include "singleton.h"
 #include "ipc.h"
 #include "avm.h"
+#include "leak_cleaner.h"
 
 
 namespace game
@@ -133,17 +135,23 @@ public:
         if (!r)
             return nullptr;
 
-        /*
-        r->composite |= 0x20000000; // Stack pin
-        r->composite += 1; // Refcount
-        */
-
-        // Remove from zct
-        r->composite &= ~0x80000000; // in zct
-
-        auto *gc = avm::get_block_header(r)->gc;
-
-        gc->zct_bottom[r->zct_index()] = 0;
+        // Take the new string out of the zero count table, so the next reap doesn't free it
+        // while only our raw pointers refer to it (as MMgc's ZCT::Remove does). Its entry is
+        // found by its index across all the table's blocks: indexing the current block alone
+        // (as before) wrote zero somewhere in the heap once the table spanned blocks, and the
+        // reaper later crashed on the damaged objects. Only our own entry is ever cleared.
+        if (r->composite & 0x80000000)   // in the ZCT
+        {
+            auto *gc = avm::get_block_header(r)->gc;
+            const uint32_t index = r->zct_index();
+            uintptr_t **block = gc->zct_blocktable ? gc->zct_blocktable + (index >> 9) : nullptr;
+            if (block && block < gc->zct_blocktop && *block
+                && (*block)[index & 511] == reinterpret_cast<uintptr_t>(r))
+            {
+                (*block)[index & 511] = 0;
+                r->composite &= ~0x80000000;
+            }
+        }
 
         return r;
     }
@@ -198,6 +206,7 @@ public:
 
 
 friend class Singleton;
+friend class LeakCleaner;
 
 private:
 
@@ -235,6 +244,10 @@ private:
                         *m_action_closure = nullptr;
 
     avm::AbcEnv         *abc_env = nullptr;
+
+    avm::GC             *m_gc = nullptr;
+
+    LeakCleaner m_cleaner { *this };   // works around the game client's memory leaks
 
 };
 
